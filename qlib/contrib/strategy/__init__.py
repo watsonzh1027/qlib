@@ -7,6 +7,7 @@ from .signal_strategy import (
     WeightStrategyBase,
     EnhancedIndexingStrategy,
 )
+from .crypto_strategy import CryptoTopNStrategy
 
 from .rule_strategy import (
     TWAPStrategy,
@@ -21,6 +22,7 @@ __all__ = [
     "TopkDropoutStrategy",
     "WeightStrategyBase",
     "EnhancedIndexingStrategy",
+    "CryptoTopNStrategy",
     "TWAPStrategy",
     "SBBStrategyBase",
     "SBBStrategyEMA",
