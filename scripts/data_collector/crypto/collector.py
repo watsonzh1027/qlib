@@ -18,6 +18,7 @@ from pycoingecko import CoinGeckoAPI
 from time import mktime
 from datetime import datetime as dt
 import time
+import math
 
 
 _CG_CRYPTO_SYMBOLS = None
@@ -105,8 +106,13 @@ class CryptoCollector(BaseCollector):
         self.init_datetime()
 
     def init_datetime(self):
+        # treat 1min and 1h as intraday with recent default start
         if self.interval == self.INTERVAL_1min:
             self.start_datetime = max(self.start_datetime, self.DEFAULT_START_DATETIME_1MIN)
+        elif self.interval == "1h":
+            # default to last ~90 days for 1h if not specified
+            if self.start_datetime is None:
+                self.start_datetime = pd.Timestamp.now() - pd.Timedelta(days=90)
         elif self.interval == self.INTERVAL_1d:
             pass
         else:
@@ -128,12 +134,60 @@ class CryptoCollector(BaseCollector):
     @abc.abstractmethod
     def _timezone(self):
         raise NotImplementedError("rewrite get_timezone")
+    
+    # default implementations so CryptoCollector can be used for multiple intervals
+    def get_instrument_list(self):
+        logger.info("get coingecko crypto symbols (default)......")
+        symbols = get_cg_crypto_symbols()
+        logger.info(f"get {len(symbols)} symbols.")
+        return symbols
+
+    def normalize_symbol(self, symbol):
+        return symbol
+
+    @property
+    def _timezone(self):
+        # intraday data usually in UTC on CoinGecko; daily data can be considered Asia/Shanghai for legacy behavior
+        if self.interval in (self.INTERVAL_1min, "1h"):
+            return "UTC"
+        return "Asia/Shanghai"
 
     @staticmethod
     def get_data_from_remote(symbol, interval, start, end):
         error_msg = f"{symbol}-{interval}-{start}-{end}"
         try:
             cg = CoinGeckoAPI()
+            # For intraday (1h/1min) use the range endpoint
+            if interval in ("1h", "1min"):
+                try:
+                    from_ts = int(pd.Timestamp(start).timestamp())
+                    to_ts = int(pd.Timestamp(end).timestamp())
+                except Exception:
+                    to_ts = int(pd.Timestamp.now().timestamp())
+                    from_ts = int((pd.Timestamp.now() - pd.Timedelta(days=90)).timestamp())
+
+                data = cg.get_coin_market_chart_range_by_id(id=symbol, vs_currency="usd", from_timestamp=from_ts, to_timestamp=to_ts)
+                if not data or "prices" not in data:
+                    return None
+                dates = [pd.to_datetime(int(x[0]), unit="ms") for x in data["prices"]]
+                close = [x[1] for x in data["prices"]]
+                volume = None
+                if "total_volumes" in data:
+                    volume = [x[1] for x in data["total_volumes"]]
+
+                _resp = pd.DataFrame({"date": dates, "close": close})
+                if volume is not None and len(volume) == len(dates):
+                    _resp["volume"] = volume
+                _resp.set_index("date", inplace=True)
+                if interval == "1h":
+                    _resp = _resp.resample("1h").agg({"close": "last", "volume": "sum"})
+                elif interval == "1min":
+                    _resp = _resp.resample("1min").agg({"close": "last", "volume": "sum"})
+                _resp = _resp.dropna().reset_index()
+                _resp["date"] = pd.to_datetime(_resp["date"])
+                return _resp
+
+            # fallback: daily history
             data = cg.get_coin_market_chart_by_id(id=symbol, vs_currency="usd", days="max")
             _resp = pd.DataFrame(columns=["date"] + list(data.keys()))
             _resp["date"] = [dt.fromtimestamp(mktime(time.localtime(x[0] / 1000))) for x in data["prices"]]
@@ -162,7 +216,7 @@ class CryptoCollector(BaseCollector):
                 end=end_,
             )
 
-        if interval == self.INTERVAL_1d:
+        if interval in (self.INTERVAL_1d, self.INTERVAL_1min, "1h"):
             _result = _get_simple(start_datetime, end_datetime)
         else:
             raise ValueError(f"cannot support {interval}")
@@ -218,6 +272,14 @@ class CryptoNormalize(BaseNormalize):
         df = self.normalize_crypto(df, self._calendar_list, self._date_field_name, self._symbol_field_name)
         return df
 
+    def _get_calendar_list(self):
+        """
+        Return a calendar list for reindexing.
+        For crypto (both intraday and daily) we don't require a predefined calendar,
+        so return None to indicate no calendar-based reindexing should be applied.
+        """
+        return None
+
 
 class CryptoNormalize1d(CryptoNormalize):
     def _get_calendar_list(self):
@@ -243,11 +305,13 @@ class Run(BaseRun):
 
     @property
     def collector_class_name(self):
-        return f"CryptoCollector{self.interval}"
+        # use single collector class and pass interval at runtime
+        return "CryptoCollector"
 
     @property
     def normalize_class_name(self):
-        return f"CryptoNormalize{self.interval}"
+        # use single normalize class; normalization will handle interval-aware data
+        return "CryptoNormalize"
 
     @property
     def default_base_dir(self) -> [Path, str]:
