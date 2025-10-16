@@ -1,5 +1,11 @@
 # Collect Crypto Data
 
+> **IMPORTANT NOTES**: 
+> - Data is collected from [Coingecko](https://www.coingecko.com/en/api)'s free API which has limitations:
+>   - Only provides up to 1 year of historical data
+>   - Rate limits apply
+> - For production use, consider using Coingecko Pro API or alternative data sources
+> 
 > *Please pay **ATTENTION** that the data is collected from [Coingecko](https://www.coingecko.com/en/api) and the data might not be perfect. We recommend users to prepare their own data if they have high-quality dataset. For more information, users can refer to the [related document](https://qlib.readthedocs.io/en/latest/component/data.html#converting-csv-format-into-qlib-format)*
 
 ## Requirements
@@ -15,6 +21,11 @@ pip install -r requirements.txt
 
 
 ### Crypto Data
+
+#### Data Limitations
+- Maximum 1 year of historical data
+- Hourly data limited to last 90 days
+- Rate limits: ~50 calls/minute
 
 #### 1d from Coingecko
 
