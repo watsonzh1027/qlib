@@ -1,0 +1,79 @@
+openapi: "3.0.0"
+info:
+  title: Crypto Workflow API (draft)
+  version: "0.1.0"
+paths:
+  /data/collect:
+    post:
+      summary: Trigger data collection from OKX via ccxt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                interval:
+                  type: string
+                since:
+                  type: string
+              required: [symbol, interval]
+      responses:
+        "200":
+          description: collection started
+  /models/train:
+    post:
+      summary: Train a model on prepared features
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                feature_set:
+                  type: string
+                params:
+                  type: object
+      responses:
+        "200":
+          description: training finished with model_id and metrics
+  /models/{model_id}/predict:
+    post:
+      summary: Run model prediction on input features
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data_path:
+                  type: string
+      responses:
+        "200":
+          description: predictions produced and saved
+  /backtest/run:
+    post:
+      summary: Run backtest for a model and signal file
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model_id:
+                  type: string
+                signal_path:
+                  type: string
+                assumptions:
+                  type: object
+      responses:
+        "200":
+          description: backtest report generated
