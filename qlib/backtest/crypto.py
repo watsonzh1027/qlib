@@ -4,15 +4,19 @@ from typing import Dict, Optional
 from pathlib import Path
 import yaml
 import json
+from qlib.utils.logging import setup_logger
 
 class BacktestEngine:
     """Cryptocurrency trading strategy backtester"""
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, fee_rate: Optional[float] = None,
+                 slippage: Optional[float] = None, max_position: Optional[float] = None):
+        self.logger = setup_logger("backtest.crypto")
         self.config = self._load_config(config_path)
-        self.fee_rate = self.config["trading"]["costs"]["fee"]
-        self.slippage = self.config["trading"]["costs"]["slippage"]
-        self.max_position = self.config["trading"]["position"]["max_size"]
+        self.fee_rate = fee_rate if fee_rate is not None else self.config["trading"]["costs"]["fee"]
+        self.slippage = slippage if slippage is not None else self.config["trading"]["costs"]["slippage"]
+        self.max_position = max_position if max_position is not None else self.config["trading"]["position"]["max_size"]
+        self.cash = 1.0  # Initialize cash for tracking
     
     def _load_config(self, config_path: Optional[str] = None) -> Dict:
         if config_path is None:
@@ -21,20 +25,25 @@ class BacktestEngine:
             return yaml.safe_load(f)
     
     def run(self, prices: pd.DataFrame, signals: pd.DataFrame) -> Dict:
-        """Execute backtest and return results"""
+        self.logger.info("Starting backtest simulation", extra={
+            "start_date": prices.index[0].isoformat(),
+            "end_date": prices.index[-1].isoformat(),
+            "n_signals": len(signals)
+        })
+        
         # Initialize portfolio tracking
         equity_curve = self._initialize_equity_curve(prices.index)
         trades = []
         position = 0
-        
+
         # Simulate trading
         for timestamp in prices.index:
             signal = signals.loc[timestamp]
             current_price = prices.loc[timestamp]
-            
+
             # Calculate target position
             target_position = self._calculate_target_position(signal)
-            
+
             # Execute trade if needed
             if target_position != position:
                 trade = self._execute_trade(
@@ -45,19 +54,25 @@ class BacktestEngine:
                     signal_score=signal["score"]
                 )
                 trades.append(trade)
+                # Deduct cost from cash
+                self.cash -= trade["cost"]
                 position = target_position
-            
+
             # Update equity curve
             equity_curve.loc[timestamp, "position"] = position
+            equity_curve.loc[timestamp, "cash"] = self.cash
             equity_curve.loc[timestamp, "equity"] = self._calculate_equity(
                 position=position,
-                price=current_price["close"],
-                prev_equity=equity_curve["equity"].iloc[-2] if len(equity_curve) > 1 else 1.0
+                price=current_price["close"]
             )
         
         # Calculate performance metrics
         metrics = self._calculate_metrics(equity_curve, trades)
         
+        self.logger.info("Backtest completed", extra={
+            "metrics": metrics,
+            "trade_count": len(trades)
+        })
         return {
             "equity_curve": equity_curve,
             "trades": pd.DataFrame(trades),
@@ -74,8 +89,15 @@ class BacktestEngine:
         """Execute trade with transaction costs"""
         size = target_position - current_position
         executed_price = price["open"] * (1 + np.sign(size) * self.slippage)
-        cost = abs(size) * executed_price * self.fee_rate
-        
+        cost = abs(size) * executed_price * (self.fee_rate + self.slippage)
+
+        self.logger.debug("Trade executed", extra={
+            "timestamp": timestamp.isoformat(),
+            "size": size,
+            "price": executed_price,
+            "cost": cost
+        })
+
         return {
             "timestamp": timestamp,
             "size": size,
@@ -106,7 +128,13 @@ class BacktestEngine:
         """Calculate maximum drawdown percentage"""
         peak = equity.expanding().max()
         drawdown = (equity - peak) / peak
-        return float(drawdown.min())
+        drawdown_clean = drawdown.dropna()
+        if drawdown_clean.empty:
+            return 0.0
+        min_drawdown = np.nanmin(drawdown_clean.values)
+        if not np.isfinite(min_drawdown):
+            return 0.0
+        return float(min_drawdown)
     
     def _calculate_win_rate(self, trades: list) -> float:
         """Calculate percentage of profitable trades"""
@@ -114,3 +142,15 @@ class BacktestEngine:
             return 0
         profits = [t["size"] * (t["price"] - t["cost"]) for t in trades]
         return sum(p > 0 for p in profits) / len(profits)
+
+    def _initialize_equity_curve(self, index: pd.DatetimeIndex) -> pd.DataFrame:
+        """Initialize equity curve DataFrame"""
+        return pd.DataFrame({
+            "position": 0.0,
+            "equity": 1.0,
+            "cash": 1.0
+        }, index=index)
+
+    def _calculate_equity(self, position: float, price: float) -> float:
+        """Calculate current equity as cash + position value"""
+        return self.cash + position * price

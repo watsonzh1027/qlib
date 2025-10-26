@@ -7,3 +7,6 @@ trading:
   position:
     max_size: 1.0
     min_size: 0.01
+  costs:
+    fee: 0.001
+    slippage: 0.0005
