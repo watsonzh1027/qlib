@@ -1,8 +1,12 @@
 [run]
-source = qlib
+source = 
+    qlib
+    examples
+branch = True
 omit = 
     */tests/*
     */__init__.py
+    */setup.py
 
 [report]
 exclude_lines =
@@ -13,5 +17,11 @@ exclude_lines =
     pass
     raise ImportError
 
+# Show missing lines in the report
+show_missing = True
+skip_covered = False
+
 [html]
 directory = coverage_html
+show_contexts = True
+title = QLib Test Coverage Report
