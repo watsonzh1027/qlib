@@ -9,7 +9,7 @@ Primary user stories (derived):
 - US4: Backtest harness and reporting (P2)
 
 ## Phase 1 — Setup (project initialization)
-- [ ] T001 Create directories for data, models, features, signals, backtest, reports (/home/watson/work/qlib)  
+- [X] T001 Create directories for data, models, features, signals, backtest, reports (/home/watson/work/qlib)  
 - [ ] T002 [P] Add manifest template file /home/watson/work/qlib/features/crypto-workflow/manifest_template.yaml  
 - [ ] T003 Create examples script stubs: /home/watson/work/qlib/examples/collect_okx_ohlcv.py, /home/watson/work/qlib/examples/preprocess_features.py, /home/watson/work/qlib/examples/train_lgb.py, /home/watson/work/qlib/examples/predict_and_signal.py, /home/watson/work/qlib/examples/backtest.py
 - [ ] T004 Add quickstart and README update: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
@@ -51,28 +51,28 @@ Primary user stories (derived):
 
 ## TDD — Tests for each development task (ensure TDD for all implementation work)
 
-- [ ] T026 Verify directories created and permissions in /home/watson/work/qlib/tests/test_setup_dirs.py
-- [ ] T027 [P] Validate manifest template exists and YAML schema in /home/watson/work/qlib/tests/test_manifest_template.py
-- [ ] T028 [P] Ensure example script stubs importable and exit cleanly in /home/watson/work/qlib/tests/test_examples_stubs.py
-- [ ] T029 Validate quickstart.md contains required example commands in /home/watson/work/qlib/tests/test_quickstart_examples.py
+- [X] T026 Verify directories created and permissions in /home/watson/work/qlib/tests/test_setup_dirs.py
+- [X] T027 [P] Validate manifest template exists and YAML schema in /home/watson/work/qlib/tests/test_manifest_template.py
+- [X] T028 [P] Ensure example script stubs importable and exit cleanly in /home/watson/work/qlib/tests/test_examples_stubs.py
+- [X] T029 Validate quickstart.md contains required example commands in /home/watson/work/qlib/tests/test_quickstart_examples.py
 
-- [ ] T030 [US1] Unit test for ccxt-based collector skeleton behaviors (rate-limit handling stub) in /home/watson/work/qlib/tests/test_collector_skeleton.py
-- [ ] T031 Unit test for Parquet write utility (round-trip write/read) in /home/watson/work/qlib/tests/test_io_parquet.py
-- [ ] T032 Unit test for data validation utilities (bad rows flagged) in /home/watson/work/qlib/tests/test_validation.py
-- [ ] T033 [US2] Unit test for LightGBM training wrapper interface (mock train) in /home/watson/work/qlib/tests/test_train_utils.py
-- [ ] T034 Unit test for model persistence helper(save/load) in /home/watson/work/qlib/tests/test_model_io.py
+- [X] T030 [US1] Unit test for ccxt-based collector skeleton behaviors (rate-limit handling stub) in /home/watson/work/qlib/tests/test_collector_skeleton.py
+- [X] T031 Unit test for Parquet write utility (round-trip write/read) in /home/watson/work/qlib/tests/test_io_parquet.py
+- [X] T032 Unit test for data validation utilities (bad rows flagged) in /home/watson/work/qlib/tests/test_validation.py
+- [X] T033 [US2] Unit test for LightGBM training wrapper interface (mock train) in /home/watson/work/qlib/tests/test_train_utils.py
+- [X] T034 Unit test for model persistence helper(save/load) in /home/watson/work/qlib/tests/test_model_io.py
 
-- [ ] T035 [US1] Unit test for manifest writer ensuring metadata fields present in /home/watson/work/qlib/tests/test_manifest_writer.py
-- [ ] T036 [US2] Unit test for preprocessing & feature export (no NaNs after featurize) in /home/watson/work/qlib/tests/test_preprocess_features.py
-- [ ] T037 [US2] Integration/unit test for training entrypoint producing expected model file path in /home/watson/work/qlib/tests/test_train_lgb_entry.py
-- [ ] T038 [US2] Unit test for training report generator producing JSON/HTML report in /home/watson/work/qlib/tests/test_train_report.py
+- [X] T035 [US1] Unit test for manifest writer ensuring metadata fields present in /home/watson/work/qlib/tests/test_manifest_writer.py
+- [X] T036 [US2] Unit test for preprocessing & feature export (no NaNs after featurize) in /home/watson/work/qlib/tests/test_preprocess_features.py
+- [X] T037 [US2] Integration/unit test for training entrypoint producing expected model file path in /home/watson/work/qlib/tests/test_train_lgb_entry.py
+- [X] T038 [US2] Unit test for training report generator producing JSON/HTML report in /home/watson/work/qlib/tests/test_train_report.py
 
-- [ ] T039 [US3] Unit test for signal rules converting scores → BUY/SELL/HOLD and position sizing in /home/watson/work/qlib/tests/test_signal_rules.py
-- [ ] T040 [US4] Unit test for backtest report serializer (report fields and metrics validity) in /home/watson/work/qlib/tests/test_backtest_report.py
+- [X] T039 [US3] Unit test for signal rules converting scores → BUY/SELL/HOLD and position sizing in /home/watson/work/qlib/tests/test_signal_rules.py
+- [X] T040 [US4] Unit test for backtest report serializer (report fields and metrics validity) in /home/watson/work/qlib/tests/test_backtest_report.py
 
-- [ ] T041 Validate quickstart examples execute as smoke runs (dry-run) in /home/watson/work/qlib/tests/test_quickstart_smoke.py
-- [ ] T042 [P] Validate CI workflow file presence and basic syntax in .github/workflows/ (test: /home/watson/work/qlib/tests/test_ci_workflow_presence.py)
-- [ ] T043 Validate config_defaults.md presence and required keys in /home/watson/work/qlib/tests/test_config_defaults.py
+- [X] T041 Validate quickstart examples execute as smoke runs (dry-run) in /home/watson/work/qlib/tests/test_quickstart_smoke.py
+- [X] T042 [P] Validate CI workflow file presence and basic syntax in .github/workflows/ (test: /home/watson/work/qlib/tests/test_ci_workflow_presence.py)
+- [X] T043 Validate config_defaults.md presence and required keys in /home/watson/work/qlib/tests/test_config_defaults.py
 
 ## Dependencies (execution order / gating)
 1. Complete Phase 1 tasks T001–T004 before Phase 2.  

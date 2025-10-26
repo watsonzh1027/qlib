@@ -1,1 +1,3 @@
-# This file makes the directory a Python package.
+"""
+QLib scripts package
+"""

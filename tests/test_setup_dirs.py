@@ -2,7 +2,10 @@ import pytest
 from pathlib import Path
 import os
 import sys
+
+# Add project root to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from scripts.setup_project_structure import setup_project_directories
 
 def test_directory_creation(tmp_path):
@@ -42,3 +45,33 @@ def test_directory_creation(tmp_path):
             test_file.unlink()
         except Exception as e:
             pytest.fail(f"Directory not writeable: {dir_path}, error: {e}")
+
+
+def test_default_base_dir():
+    """Test directory creation with default base_dir (None)"""
+    base_dir = setup_project_directories()
+    assert base_dir == Path(__file__).parent.parent
+
+
+def test_main_execution(capsys):
+    """Test script execution via main() function"""
+    from scripts.setup_project_structure import main
+
+    # Call the main function
+    result = main()
+
+    # Capture the output
+    captured = capsys.readouterr()
+
+    # Verify the output
+    assert "Created project structure in" in captured.out
+    assert "error" not in captured.err.lower()
+
+    # Verify the return value
+    assert isinstance(result, str)
+    assert "Created project structure in" in result
+
+    # Verify the default base directory is used
+    base_dir = Path(__file__).parent.parent
+    assert str(base_dir) in captured.out
+    assert str(base_dir) in result
