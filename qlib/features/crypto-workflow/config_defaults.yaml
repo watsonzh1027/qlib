@@ -1,0 +1,9 @@
+# Default configuration for signal generation
+trading:
+  enabled: true
+  thresholds:
+    buy: 0.7
+    sell: 0.3
+  position:
+    max_size: 1.0
+    min_size: 0.01
