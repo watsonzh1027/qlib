@@ -1,0 +1,68 @@
+data_collection:
+  exchange: "okx"
+  interval: "15min"
+  api:
+    rate_limit: 20  # requests/second
+    retries: 3
+    backoff: "exponential"
+  
+data_validation:
+  missing_threshold: 0.05  # max 5% missing per day
+  gap_fill:
+    short_gap: 15  # minutes, forward fill
+    long_gap: 150  # minutes, skip trading
+  outliers:
+    price_jump: 0.30  # 30% threshold
+    volume_spike: 10.0  # 10x average
+    min_volume: 10000  # $10K daily
+
+storage:
+  format: "parquet"
+  compression: "snappy"
+  retention_years: 2
+  paths:
+    raw: "data/raw/{exchange}/{symbol}/{interval}"
+    processed: "data/processed/{exchange}/{symbol}/{interval}"
+    features: "features/{symbol}/{interval}"
+    models: "models/{symbol}/{interval}"
+    signals: "signals/{model_id}"
+    backtest: "backtest/{model_id}"
+
+model:
+  framework: "lightgbm"
+  version: "3.3.5"
+  params:
+    num_leaves: 31
+    learning_rate: 0.05
+  requirements:
+    min_history: "6M"
+    train_size: 0.8
+    val_size: 0.2
+
+trading:
+  thresholds:
+    buy: 0.7
+    sell: 0.3
+  position:
+    min_trade: 100  # USD
+    max_size: 1.0   # 100% of capital
+  costs:
+    fee: 0.0005     # 0.05%
+    slippage: 0.0005  # 0.05%
+
+metrics:
+  primary:
+    min_accuracy: 0.55
+    min_sharpe: 1.2
+    max_drawdown: 0.25
+  secondary:
+    min_winrate: 0.52
+    min_profit_factor: 1.3
+    max_recovery_days: 20
+
+performance:
+  collection: 5    # seconds per day
+  processing: 30   # seconds per year
+  training: 600    # seconds per model
+  inference: 0.1   # seconds per prediction
+  backtest: 60     # seconds per year
