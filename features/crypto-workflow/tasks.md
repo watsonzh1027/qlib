@@ -10,9 +10,9 @@ Primary user stories (derived):
 
 ## Phase 1 — Setup (project initialization)
 - [X] T001 Create directories for data, models, features, signals, backtest, reports (/home/watson/work/qlib)  
-- [ ] T002 [P] Add manifest template file /home/watson/work/qlib/features/crypto-workflow/manifest_template.yaml  
-- [ ] T003 Create examples script stubs: /home/watson/work/qlib/examples/collect_okx_ohlcv.py, /home/watson/work/qlib/examples/preprocess_features.py, /home/watson/work/qlib/examples/train_lgb.py, /home/watson/work/qlib/examples/predict_and_signal.py, /home/watson/work/qlib/examples/backtest.py
-- [ ] T004 Add quickstart and README update: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
+- [X] T002 [P] Add manifest template file /home/watson/work/qlib/features/crypto-workflow/manifest_template.yaml  
+- [X] T003 Create examples script stubs: /home/watson/work/qlib/examples/collect_okx_ohlcv.py, /home/watson/work/qlib/examples/preprocess_features.py, /home/watson/work/qlib/examples/train_lgb.py, /home/watson/work/qlib/examples/predict_and_signal.py, /home/watson/work/qlib/examples/backtest.py
+- [X] T004 Add quickstart and README update: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
 
 ## Phase 2 — Foundational (blocking prerequisites)
 - [ ] T005 [US1] Implement ccxt-based collector skeleton in /home/watson/work/qlib/examples/collect_okx_ohlcv.py

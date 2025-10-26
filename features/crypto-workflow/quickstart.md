@@ -1,24 +1,81 @@
-# quickstart.md — End-to-end example (local)
+# Crypto Trading Workflow Quickstart Guide
 
-1. 拉取 1 天的分钟线 OHLCV（示例）
-   - 调用脚本： `python examples/collect_okx_ohlcv.py --symbol BTC/USDT --interval 1m --since 2025-01-01`
-   - 输出： `data/raw/okx/BTC-USDT/1m/{YYYYMMDD}.parquet`
+## Prerequisites
+```bash
+pip install ccxt lightgbm pandas numpy pytest
+```
 
-2. 数据清洗与特征生成
-   - 调用脚本： `python examples/preprocess_features.py --input data/raw/... --output data/processed/...`
-   - 输出： `data/processed/BTC-USDT/1m/v1.parquet` 和 `features/feature_set/train.parquet`
+## Data Collection
+```bash
+# Collect 15-minute OHLCV data for BTC-USDT
+python examples/collect_okx_ohlcv.py \
+  --symbol BTC-USDT \
+  --interval 15min \
+  --start 2024-01-01 \
+  --end 2024-01-31 \
+  --output data/raw/okx/BTC-USDT/15min/
+```
 
-3. 训练模型（LightGBM）
-   - 调用脚本： `python examples/train_lgb.py --features features/feature_set/train.parquet --out models/feature_set/v1.bin`
-   - 输出： 模型文件 `models/feature_set/v1.bin` 和评估报告 `reports/train/v1/`
+## Feature Generation
+```bash
+# Preprocess raw data and generate features
+python examples/preprocess_features.py \
+  --input data/raw/okx/BTC-USDT/15min/ \
+  --output features/BTC-USDT/15min/v1/ \
+  --start 2024-01-01 \
+  --end 2024-01-31
+```
 
-4. 加载模型并预测、生成信号
-   - 调用脚本： `python examples/predict_and_signal.py --model models/feature_set/v1.bin --input data/processed/... --out signals/feature_set/v1/2025-01-09.csv`
+## Model Training
+```bash
+# Train LightGBM model
+python examples/train_lgb.py \
+  --features features/BTC-USDT/15min/v1/ \
+  --model-output models/BTC-USDT/15min/v1.bin \
+  --train-start 2024-01-01 \
+  --train-end 2024-01-25 \
+  --val-start 2024-01-26 \
+  --val-end 2024-01-31
+```
 
-5. 回测
-   - 调用脚本： `python examples/backtest.py --signals signals/... --ohlcv data/raw/... --out backtest/feature_set/v1/report.json`
-   - 输出： 回测报告 JSON 与交易明细 CSV
+## Signal Generation
+```bash
+# Generate trading signals
+python examples/predict_and_signal.py \
+  --model models/BTC-USDT/15min/v1.bin \
+  --data features/BTC-USDT/15min/v1/ \
+  --output signals/BTC-USDT/15min/v1/
+```
 
-注意：
-- 每一步都有可配置参数（交易对、时间粒度、手续费、滑点）。
-- 保持 manifest 文件以记录数据/模型的版本与起止时间，便于复现。
+## Backtesting
+```bash
+# Run backtest
+python examples/backtest.py \
+  --signals signals/BTC-USDT/15min/v1/ \
+  --market-data data/raw/okx/BTC-USDT/15min/ \
+  --output backtest/BTC-USDT/15min/v1/report.json
+```
+
+## Directory Structure
+```
+qlib/
+├── data/
+│   └── raw/
+│       └── okx/
+│           └── BTC-USDT/
+│               └── 15min/
+├── features/
+│   └── BTC-USDT/
+│       └── 15min/
+├── models/
+├── signals/
+└── backtest/
+```
+
+## Configuration
+Key parameters are defined in `config_defaults.yaml`:
+- Data collection: rate limits, retry policy
+- Feature generation: technical indicators, window sizes
+- Model: LightGBM parameters, validation thresholds
+- Trading: signal thresholds, position sizing
+- Backtest: transaction costs, slippage assumptions

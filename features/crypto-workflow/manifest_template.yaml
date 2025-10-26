@@ -1,0 +1,15 @@
+# OHLCV Data Manifest Template
+exchange_id: "okx"  # Exchange identifier
+symbol: "BTC-USDT"  # Trading pair
+interval: "15min"   # Time interval
+start_timestamp: "2024-01-01T00:00:00Z"  # Data start time (UTC)
+end_timestamp: "2024-01-02T00:00:00Z"    # Data end time (UTC)
+fetch_timestamp: "2024-01-02T00:01:00Z"   # When data was collected
+version: "1.0.0"    # Schema version
+row_count: 96       # Number of data rows
+
+# Optional metadata
+validation:
+  missing_rows: 0   # Count of missing intervals
+  outliers: 0       # Count of flagged outliers
+  gaps_filled: 0    # Count of gaps that were filled
