@@ -30,9 +30,9 @@ Primary user stories (derived):
 
 ### US2 (P1): Train model with LightGBM and persist
 - [X] T013 [US2] Implement preprocessing & feature export: /home/watson/work/qlib/examples/preprocess_features.py (align, fill, featurize, save features parquet)
-- [ ] T014 [US2] Implement training entrypoint: /home/watson/work/qlib/examples/train_lgb.py (load features, train LightGBM via LGBModel wrapper, save model to /home/watson/work/qlib/models/)
-- [ ] T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto_workflow/reports/train_report.py
-- [ ] T016 [US2] Add unit test verifying model file existence and basic metrics in /home/watson/work/qlib/tests/test_train_lgb.py
+- [X] T014 [US2] Implement training entrypoint: /home/watson/work/qlib/examples/train_lgb.py (load features, train LightGBM via LGBModel wrapper, save model to /home/watson/work/qlib/models/)
+- [X] T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto_workflow/reports/train_report.py
+- [X] T016 [US2] Add unit test verifying model file existence and basic metrics in /home/watson/work/qlib/tests/test_train_lgb.py
 
 ### US3 (P1): Load model, predict and generate signals
 - [ ] T017 [US3] Implement predictor that loads model and creates signals: /home/watson/work/qlib/examples/predict_and_signal.py
@@ -236,14 +236,14 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-Current Progress: 10/25 tasks completed (40%)
+Current Progress: 13/25 tasks completed (52%)
 Latest completed:
 - T013: Alpha360 feature implementation and tests
-- Validated feature groups: Price, Volume, Momentum, Volatility
-- Added comprehensive tests for Alpha360 features
+- T014: Training entrypoint implemented and trainer + report saving
+- T016: Unit test for training implemented (test_train_lgb.py)
 
 ## Next immediate actions (updated)
-1. Implement T014 (train entrypoint) using the Alpha360 features
-2. Implement T016 (train unit test) to validate model training with Alpha360
-3. Continue with T018 (signal_rules) and T017 (predict_and_signal)
+1. Implement T018 (signal_rules) and T017 (predict_and_signal).
+2. Continue collector work (T010/T011) in parallel with tests T012.
+3. Implement backtest T020/T021 and T022 after signals are ready.
 

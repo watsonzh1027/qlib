@@ -4,9 +4,13 @@ source =
     examples
 branch = True
 omit = 
-    */tests/*
-    */__init__.py
-    */setup.py
+    # tests and test helpers
+    tests/*.py
+    tests/**/*.py
+    # virtualenv / site-packages
+    */.venv/*
+    */env/*
+    */site-packages/*
 
 [report]
 exclude_lines =
@@ -17,8 +21,8 @@ exclude_lines =
     pass
     raise ImportError
 
-# Show missing lines in the report
-show_missing = True
+# Hide missing file list by default
+show_missing = False
 skip_covered = False
 
 [html]

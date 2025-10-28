@@ -5,6 +5,11 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+# Add repo root (/home/watson/work/qlib) to sys.path so tests can import top-level packages
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 """Ignore RL tests on non-linux platform."""
 collect_ignore = []
 

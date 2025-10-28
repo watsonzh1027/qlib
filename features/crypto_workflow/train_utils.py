@@ -26,13 +26,16 @@ class LGBModel:
         """Train model with early stopping."""
         train_data = lgb.Dataset(X, label=y)
         valid_data = None if eval_set is None else lgb.Dataset(*eval_set)
-        
+
+        callbacks = [lgb.log_evaluation(period=100)]
+        if valid_data is not None:
+            callbacks.append(lgb.early_stopping(early_stopping_rounds))
+
         self.model = lgb.train(
             self.params,
             train_data,
             valid_sets=[valid_data] if valid_data else None,
-            early_stopping_rounds=early_stopping_rounds,
-            callbacks=[lgb.log_evaluation(period=100)]
+            callbacks=callbacks
         )
         
         # Compute training metrics
