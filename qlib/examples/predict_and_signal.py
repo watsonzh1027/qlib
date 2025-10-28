@@ -9,12 +9,12 @@ import argparse
 import pandas as pd
 import yaml
 
-# Add qlib to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from features.crypto_workflow.model_io import load_model
 from features.crypto_workflow.signal_rules import score_to_signal
-from utils.io import write_parquet
+from qlib.utils.io import write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def predict_signals(
 ) -> pd.DataFrame:
     """Load model, make predictions and generate signals."""
     # Load model
-    model = load_model(model_path)
+    model, _ = load_model(model_path)
     
     # Load features
     features_df = pd.read_parquet(features_path)
