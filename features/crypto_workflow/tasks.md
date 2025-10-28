@@ -35,8 +35,8 @@ Primary user stories (derived):
 - [X] T016 [US2] Add unit test verifying model file existence and basic metrics in /home/watson/work/qlib/tests/test_train_lgb.py
 
 ### US3 (P1): Load model, predict and generate signals
-- [ ] T017 [US3] Implement predictor that loads model and creates signals: /home/watson/work/qlib/examples/predict_and_signal.py
-- [ ] T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto_workflow/signal_rules.py (convert scores → BUY/SELL/HOLD, position_size)
+- [X] T017 [US3] Implement predictor that loads model and creates signals: /home/watson/work/qlib/examples/predict_and_signal.py
+- [X] T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto_workflow/signal_rules.py (convert scores → BUY/SELL/HOLD, position_size)
 - [ ] T019 [US3] Add integration test to run a short predict → signal flow in /home/watson/work/qlib/tests/test_predict_signal.py
 
 ### US4 (P2): Backtest harness and reporting
@@ -236,14 +236,14 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-Current Progress: 13/25 tasks completed (52%)
+Current Progress: 15/25 tasks completed (60%)
 Latest completed:
-- T013: Alpha360 feature implementation and tests
-- T014: Training entrypoint implemented and trainer + report saving
+- T017: Predictor implementation with model loading and signal generation
+- T018: Signal rules module for converting scores to trading signals
 - T016: Unit test for training implemented (test_train_lgb.py)
 
 ## Next immediate actions (updated)
-1. Implement T018 (signal_rules) and T017 (predict_and_signal).
-2. Continue collector work (T010/T011) in parallel with tests T012.
-3. Implement backtest T020/T021 and T022 after signals are ready.
+1. Implement T019 (predict → signal integration test)
+2. Continue collector work (T010/T011) in parallel with tests T012
+3. Implement backtest T020/T021 and T022 after signals are ready
 
