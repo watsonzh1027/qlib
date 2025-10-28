@@ -10,7 +10,7 @@ from typing import Dict, List
 import logging
 import argparse
 from features.crypto_workflow.model_io import save_model
-from utils.io import write_parquet
+from qlib.utils.io import write_parquet
 from features.crypto_workflow.alpha360 import Alpha360Calculator
 
 # Add qlib to path
@@ -60,14 +60,14 @@ def align_and_fill(df: pd.DataFrame) -> pd.DataFrame:
     """Align index and forward fill/backfill missing values."""
     # Ensure timestamp index
     df.index = pd.to_datetime(df.index)
-    
+
     # Sort by time
     df = df.sort_index()
-    
-    # Forward fill up to 3 periods, then backfill
-    df = df.fillna(method='ffill', limit=3)
-    df = df.fillna(method='bfill', limit=1)
-    
+
+    # Forward fill and backfill to handle all missing values
+    df = df.fillna(method='ffill')
+    df = df.fillna(method='bfill')
+
     return df
 
 def preprocess_data(input_path: Path, output_path: Path) -> None:
