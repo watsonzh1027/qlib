@@ -1,7 +1,7 @@
 # Tasks for Feature: Crypto Trading Workflow Pipeline
 
 ## Summary
-Feature dir: /home/watson/work/qlib/features/crypto-workflow  
+Feature dir: /home/watson/work/qlib/features/crypto_workflow  
 Primary user stories (derived):  
 - US1: Data collection from OKX via ccxt (P1)  
 - US2: Training with LightGBM and model persistence (P1)  
@@ -10,44 +10,44 @@ Primary user stories (derived):
 
 ## Phase 1 — Setup (project initialization)
 - [X] T001 Create directories for data, models, features, signals, backtest, reports (/home/watson/work/qlib)  
-- [X] T002 [P] Add manifest template file /home/watson/work/qlib/features/crypto-workflow/manifest_template.yaml  
+- [X] T002 [P] Add manifest template file /home/watson/work/qlib/features/crypto_workflow/manifest_template.yaml  
 - [X] T003 Create examples script stubs: /home/watson/work/qlib/examples/collect_okx_ohlcv.py, /home/watson/work/qlib/examples/preprocess_features.py, /home/watson/work/qlib/examples/train_lgb.py, /home/watson/work/qlib/examples/predict_and_signal.py, /home/watson/work/qlib/examples/backtest.py
-- [X] T004 Add quickstart and README update: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
+- [X] T004 Add quickstart and README update: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
 
 ## Phase 2 — Foundational (blocking prerequisites)
 - [X] T005 [US1] Implement ccxt-based collector skeleton in /home/watson/work/qlib/examples/collect_okx_ohlcv.py
 - [X] T006 Implement Parquet write utility in /home/watson/work/qlib/utils/io.py
-- [X] T007 Implement basic data validation utilities in /home/watson/work/qlib/features/crypto-workflow/validation.py
-- [X] T008 [US2] Add LightGBM training utility wrapper in /home/watson/work/qlib/features/crypto-workflow/train_utils.py
-- [X] T009 Add model persistence helper in /home/watson/work/qlib/features/crypto-workflow/model_io.py
+- [X] T007 Implement basic data validation utilities in /home/watson/work/qlib/features/crypto_workflow/validation.py
+- [X] T008 [US2] Add LightGBM training utility wrapper in /home/watson/work/qlib/features/crypto_workflow/train_utils.py
+- [X] T009 Add model persistence helper in /home/watson/work/qlib/features/crypto_workflow/model_io.py
 
 ## Phase 3 — User Stories (priority order)
 
 ### US1 (P1): Data collection from OKX via ccxt
 - [ ] T010 [US1] Implement full data collector: /home/watson/work/qlib/examples/collect_okx_ohlcv.py (fetch_ohlcv, pagination, rate-limit handling, write parquet)
-- [ ] T011 [US1] Implement manifest writer: /home/watson/work/qlib/features/crypto-workflow/manifest.py (write metadata per file)
+- [ ] T011 [US1] Implement manifest writer: /home/watson/work/qlib/features/crypto_workflow/manifest.py (write metadata per file)
 - [ ] T012 [US1] Add unit test for collector (small mocked fetch) in /home/watson/work/qlib/tests/test_collect_okx.py
 
 ### US2 (P1): Train model with LightGBM and persist
-- [ ] T013 [US2] Implement preprocessing & feature export: /home/watson/work/qlib/examples/preprocess_features.py (align, fill, featurize, save features parquet)
+- [X] T013 [US2] Implement preprocessing & feature export: /home/watson/work/qlib/examples/preprocess_features.py (align, fill, featurize, save features parquet)
 - [ ] T014 [US2] Implement training entrypoint: /home/watson/work/qlib/examples/train_lgb.py (load features, train LightGBM via LGBModel wrapper, save model to /home/watson/work/qlib/models/)
-- [ ] T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto-workflow/reports/train_report.py
+- [ ] T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto_workflow/reports/train_report.py
 - [ ] T016 [US2] Add unit test verifying model file existence and basic metrics in /home/watson/work/qlib/tests/test_train_lgb.py
 
 ### US3 (P1): Load model, predict and generate signals
 - [ ] T017 [US3] Implement predictor that loads model and creates signals: /home/watson/work/qlib/examples/predict_and_signal.py
-- [ ] T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto-workflow/signal_rules.py (convert scores → BUY/SELL/HOLD, position_size)
+- [ ] T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto_workflow/signal_rules.py (convert scores → BUY/SELL/HOLD, position_size)
 - [ ] T019 [US3] Add integration test to run a short predict → signal flow in /home/watson/work/qlib/tests/test_predict_signal.py
 
 ### US4 (P2): Backtest harness and reporting
 - [ ] T020 [US4] Implement backtest harness: /home/watson/work/qlib/examples/backtest.py (ingest signals + OHLCV, apply slippage/fees, compute metrics)
-- [ ] T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto-workflow/backtest_report.py
+- [ ] T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto_workflow/backtest_report.py
 - [ ] T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/watson/work/qlib/tests/test_backtest.py
 
 ## Final Phase — Polish & Cross-cutting concerns
-- [ ] T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
+- [ ] T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
 - [ ] T024 Add basic CI job snippet to run tests and format checks: .github/workflows/feature-crypto-workflow.yml
-- [ ] T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto-workflow/config_defaults.md
+- [ ] T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto_workflow/config_defaults.md
 
 ## TDD — Tests for each development task (ensure TDD for all implementation work)
 
@@ -78,7 +78,7 @@ Primary user stories (derived):
 
 Note: below each task we add short sub-steps, acceptance criteria (AC) and a rough estimate (hrs).
 
-T008 [US2] Add LightGBM training utility wrapper in /home/watson/work/qlib/features/crypto-workflow/train_utils.py
+T008 [US2] Add LightGBM training utility wrapper in /home/watson/work/qlib/features/crypto_workflow/train_utils.py
 - Sub-steps:
   - Implement LGBModel wrapper class exposing fit(X,y,params), predict(X), save(path), load(path).
   - Add simple hyperparameter defaults and early-stopping support.
@@ -88,7 +88,7 @@ T008 [US2] Add LightGBM training utility wrapper in /home/watson/work/qlib/featu
   - Training returns a dict with metrics.
 - Estimate: 8h
 
-T009 Add model persistence helper in /home/watson/work/qlib/features/crypto-workflow/model_io.py
+T009 Add model persistence helper in /home/watson/work/qlib/features/crypto_workflow/model_io.py
 - Sub-steps:
   - Implement save_model(obj, path) and load_model(path) using joblib/pickle with schema metadata file (yaml/json).
   - Ensure atomic write (temp file + rename).
@@ -106,7 +106,7 @@ T010 [US1] Implement full data collector: /home/watson/work/qlib/examples/collec
   - Collector can run in dry-run mode and produce parquet with required columns (ts, open, high, low, close, volume).
 - Estimate: 12h
 
-T011 [US1] Implement manifest writer: /home/watson/work/qlib/features/crypto-workflow/manifest.py
+T011 [US1] Implement manifest writer: /home/watson/work/qlib/features/crypto_workflow/manifest.py
 - Sub-steps:
   - Build function write_manifest(file_path, metadata_dict) that appends/updates a per-file YAML manifest.
   - Include schema: symbol, timeframe, start_ts, end_ts, row_count, file_hash.
@@ -139,7 +139,7 @@ T014 [US2] Implement training entrypoint: /home/watson/work/qlib/examples/train_
   - Model file created and report exists (test_train_lgb_entry).
 - Estimate: 6h
 
-T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto-workflow/reports/train_report.py
+T015 [US2] Output training report generator: /home/watson/work/qlib/features/crypto_workflow/reports/train_report.py
 - Sub-steps:
   - Implement report generator that accepts metrics dict and writes JSON + basic HTML (template).
 - AC:
@@ -161,7 +161,7 @@ T017 [US3] Implement predictor that loads model and creates signals: /home/watso
   - Signals parquet contains columns: ts, symbol, score, signal, pos_size.
 - Estimate: 6h
 
-T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto-workflow/signal_rules.py
+T018 [US3] Implement signal rules module: /home/watson/work/qlib/features/crypto_workflow/signal_rules.py
 - Sub-steps:
   - Implement thresholds to map score → BUY/SELL/HOLD.
   - Implement simple position sizing (score normalized * max_risk).
@@ -186,7 +186,7 @@ T020 [US4] Implement backtest harness: /home/watson/work/qlib/examples/backtest.
   - Backtest accepts config and outputs CSV/JSON report.
 - Estimate: 12h
 
-T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto-workflow/backtest_report.py
+T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto_workflow/backtest_report.py
 - Sub-steps:
   - Serialize metrics + trade list to JSON/HTML.
 - AC:
@@ -200,7 +200,7 @@ T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/wats
   - Smoke test executes within CI time budget.
 - Estimate: 4h
 
-T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto-workflow/quickstart.md
+T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
 - Sub-steps:
   - Add example CLI commands for collect→preprocess→train→predict→backtest.
   - Add notes about API keys, dry-run and test mode.
@@ -215,7 +215,7 @@ T024 Add basic CI job snippet to run tests and format checks: .github/workflows/
   - CI workflow file present and syntactically valid (test_ci_workflow_presence).
 - Estimate: 2h
 
-T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto-workflow/config_defaults.md
+T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto_workflow/config_defaults.md
 - Sub-steps:
   - Add default paths, timezones, model naming conventions, and retry settings.
 - AC:
@@ -236,6 +236,14 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-- Update this file when a sub-task is complete (check the box) and link PR number.
-- For larger tasks add a TODO.md in the feature folder with task assignees and PR links.
+Current Progress: 10/25 tasks completed (40%)
+Latest completed:
+- T013: Alpha360 feature implementation and tests
+- Validated feature groups: Price, Volume, Momentum, Volatility
+- Added comprehensive tests for Alpha360 features
+
+## Next immediate actions (updated)
+1. Implement T014 (train entrypoint) using the Alpha360 features
+2. Implement T016 (train unit test) to validate model training with Alpha360
+3. Continue with T018 (signal_rules) and T017 (predict_and_signal)
 

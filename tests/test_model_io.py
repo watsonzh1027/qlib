@@ -1,6 +1,6 @@
 import pytest
-import numpy as np
 import json
+import numpy as np
 from pathlib import Path
 from features.crypto_workflow.model_io import save_model, load_model
 
