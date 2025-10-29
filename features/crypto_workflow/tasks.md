@@ -40,7 +40,7 @@ Primary user stories (derived):
 - [X] T019 [US3] Add integration test to run a short predict → signal flow in /home/watson/work/qlib/tests/test_predict_signal.py
 
 ### US4 (P2): Backtest harness and reporting
-- [ ] T020 [US4] Implement backtest harness: /home/watson/work/qlib/examples/backtest.py (ingest signals + OHLCV, apply slippage/fees, compute metrics)
+- [X] T020 [US4] Implement backtest harness: /home/watson/work/qlib/examples/backtest.py (ingest signals + OHLCV, apply slippage/fees, compute metrics)
 - [ ] T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto_workflow/backtest_report.py
 - [ ] T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/watson/work/qlib/tests/test_backtest.py
 
@@ -236,15 +236,7 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-Current Progress: 19/25 tasks completed (76%)
+Current Progress: 20/25 tasks completed (80%)
 Latest completed:
-- T010: Full data collector with OKX integration
-- T011: Manifest writer implementation
-- T012: Collector unit tests with mocking
-
-## Next immediate actions (updated)
-1. Start implementing backtest components:
-   - T020: Implement backtest harness
-   - T021: Implement backtest report serializer
-   - T022: Add backtest smoke test
+- T020: Backtest harness implemented (examples/backtest.py)
 

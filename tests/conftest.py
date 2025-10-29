@@ -4,6 +4,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import tempfile
 
 # Add repo root (/home/watson/work/qlib) to sys.path so tests can import top-level packages
 repo_root = Path(__file__).resolve().parents[1]
@@ -59,3 +60,9 @@ def config_for_test():
             }
         }
     }
+
+@pytest.fixture
+def test_data_dir():
+    """Provide temporary directory for test data"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)

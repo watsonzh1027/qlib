@@ -1,4 +1,5 @@
 import abc
+import os
 import sys
 from pathlib import Path
 import ccxt
@@ -11,16 +12,17 @@ import json
 class CryptoCollector:
     """Crypto OHLCV data collector supporting OKX via ccxt"""
     
-    def __init__(self, save_dir, interval="15min", config_path=None):
+    def __init__(self, save_dir, interval="15min", config_path=None, qlib_home=None):
         self.save_dir = Path(save_dir)
         self.interval = interval
         self._timezone = "UTC"
+        self.qlib_home = qlib_home or os.getenv("QLIB_HOME", "/home/watson/work/qlib")
         self.config = self._load_config(config_path)
         self.exchange = self._init_exchange()
     
     def _load_config(self, config_path=None):
         if config_path is None:
-            config_path = Path("/home/watson/work/qlib/features/crypto-workflow/config_defaults.yaml")
+            config_path = Path(f"{self.qlib_home}/features/crypto_workflow/config_defaults.yaml")
         with open(config_path) as f:
             return yaml.safe_load(f)
     

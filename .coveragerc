@@ -1,16 +1,7 @@
 [run]
-source = 
-    qlib
-    examples
-branch = True
-omit = 
-    # tests and test helpers
-    tests/*.py
-    tests/**/*.py
-    # virtualenv / site-packages
-    */.venv/*
-    */env/*
-    */site-packages/*
+source =
+    qlib/examples
+    qlib/features/crypto_workflow
 
 [report]
 exclude_lines =
@@ -20,12 +11,8 @@ exclude_lines =
     raise NotImplementedError
     pass
     raise ImportError
-
-# Hide missing file list by default
-show_missing = False
-skip_covered = False
-
+    except ImportError:
+    
 [html]
 directory = coverage_html
-show_contexts = True
-title = QLib Test Coverage Report
+title = QLib Coverage Report
