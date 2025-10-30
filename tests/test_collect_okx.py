@@ -11,7 +11,6 @@ import asyncio
 import tempfile
 import yaml
 import sys
-
 from qlib.scripts.data_collector.crypto.collector import CryptoCollector
 
 class MockExchange:
@@ -43,13 +42,7 @@ pytest tests/test_collect_okx.py -v \
 
 '''
 
-
-# Add project root to path
-root_path = str(Path(__file__).parent.parent)
-if root_path not in sys.path:
-    sys.path.append(root_path)
-
-from examples.collect_okx_ohlcv import OKXCollector
+from qlib.examples.collect_okx_ohlcv import OKXCollector
 
 def test_okx_collector_init():
     """Test collector initialization with config"""
@@ -309,7 +302,7 @@ async def test_download_data_error_handling():
 
 def test_main_function():
     """Test the main function with mocked arguments"""
-    from examples.collect_okx_ohlcv import main
+    from qlib.examples.collect_okx_ohlcv import main
     import sys
 
     # Mock sys.argv
@@ -323,7 +316,7 @@ def test_main_function():
             '--output', '/tmp/test_output.parquet'
         ]
 
-        with patch("examples.collect_okx_ohlcv.OKXCollector") as mock_collector_class:
+        with patch("qlib.examples.collect_okx_ohlcv.OKXCollector") as mock_collector_class:
             mock_collector = Mock()
             mock_collector_class.return_value = mock_collector
 

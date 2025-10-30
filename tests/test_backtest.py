@@ -1,8 +1,23 @@
 import pytest
 import pandas as pd
 import numpy as np
-from qlib.backtest.crypto import BacktestEngine
 from datetime import datetime, timezone
+from pathlib import Path
+import tempfile
+
+from qlib.backtest.crypto import BacktestEngine
+from examples.backtest import run_backtest
+
+
+'''
+pytest /home/watson/work/qlib/tests/test_backtest.py -v \
+--cov=qlib.examples.backtest    \
+--cov=qlib.features.crypto_workflow.backtest_report \
+--cov-report=term-missing \
+--cov-report=html
+
+'''
+
 
 @pytest.fixture
 def sample_data():
@@ -185,3 +200,70 @@ def test_win_rate_edge_cases():
         {"size": 1, "price": 105, "cost": 100}   # profit
     ]
     assert engine._calculate_win_rate(trades_mixed) == 2.0 / 3.0
+
+
+def make_synthetic_ohlcv(start, periods, freq='1H'):
+    idx = pd.date_range(start=start, periods=periods, freq=freq, tz='UTC')
+    price = 100.0 + np.cumsum(np.random.randn(periods) * 0.5)
+    df = pd.DataFrame({
+        'timestamp': idx,
+        'open': price,
+        'high': price + np.abs(np.random.rand(periods)),
+        'low': price - np.abs(np.random.rand(periods)),
+        'close': price + np.random.randn(periods) * 0.1,
+        'volume': np.random.rand(periods) * 100
+    })
+    return df
+
+def make_synthetic_signals(timestamps):
+    # simple alternating BUY/HOLD/SELL signals with varying sizes
+    sigs = []
+    for i, ts in enumerate(timestamps):
+        if i % 10 < 4:
+            signal = 'BUY'
+            size = 0.5
+        elif i % 10 < 7:
+            signal = 'HOLD'
+            size = 0.0
+        else:
+            signal = 'SELL'
+            size = 0.5
+        sigs.append({'ts': ts, 'signal': signal, 'position_size': size})
+    return pd.DataFrame(sigs)
+
+def test_backtest_smoke(tmp_path):
+    # Create synthetic data and save to parquet
+    ohlcv = make_synthetic_ohlcv('2024-01-01', periods=48, freq='1H')
+    ohlcv_path = tmp_path / "ohlcv.parquet"
+    # save with timestamp column (run_backtest handles parquet read)
+    ohlcv.to_parquet(ohlcv_path, index=False)
+
+    signals = make_synthetic_signals(list(ohlcv['timestamp']))
+    signals_path = tmp_path / "signals.parquet"
+    signals.to_parquet(signals_path, index=False)
+
+    outdir = tmp_path / "backtest_out"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Run backtest
+    result = run_backtest(str(signals_path), str(ohlcv_path), str(outdir), slippage=0.0001, fee=0.0002)
+
+    # Basic assertions on result structure
+    assert isinstance(result, dict)
+    assert 'metrics' in result
+    metrics = result['metrics']
+    assert 'cumulative_return' in metrics
+    assert 'final_equity' in metrics
+    assert metrics['final_equity'] >= 0.0
+    assert 'max_drawdown' in metrics
+    assert metrics['max_drawdown'] >= 0.0
+
+    # Files written by backtest_report.write_backtest_report
+    assert (outdir / 'metrics.json').exists()
+    # trades may be empty, but equity curve should exist
+    assert (outdir / 'equity_curve.parquet').exists()
+
+    # Load equity curve and basic sanity checks
+    eq = pd.read_parquet(outdir / 'equity_curve.parquet')
+    assert 'equity' in eq.columns
+    assert len(eq) > 0
