@@ -4,6 +4,10 @@ Feature preprocessing and generation for crypto trading
 """
 import sys
 from pathlib import Path
+
+# Add qlib to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pandas as pd
 import numpy as np
 from typing import Dict, List
@@ -13,8 +17,6 @@ from features.crypto_workflow.model_io import save_model
 from qlib.utils.io import write_parquet
 from features.crypto_workflow.alpha360 import Alpha360Calculator
 
-# Add qlib to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +67,8 @@ def align_and_fill(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_index()
 
     # Forward fill and backfill to handle all missing values
-    df = df.fillna(method='ffill')
-    df = df.fillna(method='bfill')
+    df = df.ffill()
+    df = df.bfill()
 
     return df
 

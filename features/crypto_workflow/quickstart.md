@@ -15,10 +15,9 @@ This quickstart shows example commands for the end-to-end flow: collect → prep
   python examples/collect_okx_ohlcv.py \
     --symbol BTC/USDT \
     --timeframe 1h \
-    --start 2024-01-01 \
-    --end 2024-01-02 \
-    --output /tmp/btc_1h.parquet \
-    --dry-run
+    --start 2025-01-01 \
+    --end 2025-10-01 \
+    --output data/ohlcv/btc_1h.parquet
   ```
 
 - Real run (with OKX keys in env):
@@ -36,19 +35,21 @@ This quickstart shows example commands for the end-to-end flow: collect → prep
 ### 2) Preprocess features
 - Run featurization (align, fill, compute MA/RSI):
   ```bash
-  python examples/preprocess_features.py \
-    --input data/ohlcv/btc_1h.parquet \
-    --output data/features/btc_1h_features.parquet
+ python examples/preprocess_features.py \
+      --ohlcv-path data/ohlcv/btc_1h.parquet  \
+           --symbol btc     \
+           --timeframe 1h     \
+           --target-path data/features
   ```
 
 ### 3) Train LightGBM model (dry-run with small dataset)
 - Train and save model + report:
   ```bash
-  python examples/train_lgb.py \
-    --features data/features/btc_1h_features.parquet \
-    --model-out models/btc_lgb.pkl \
-    --report-out reports/train_btc.json \
-    --dry-run
+python examples/train_lgb.py --features data/features/features_btc_1h.parquet \
+  --model-out models/btc_lgb.pkl \
+  --report-out reports/train_btc.json
+
+
   ```
 
 ### 4) Predict & generate signals
@@ -56,16 +57,16 @@ This quickstart shows example commands for the end-to-end flow: collect → prep
   ```bash
   python examples/predict_and_signal.py \
     --model-path models/btc_lgb.pkl \
-    --features-path data/features/btc_1h_features.parquet \
+    --features-path data/features/features_btc_1h.parquet \
     --output-path signals/btc_signals.parquet
   ```
 
 - Use config for thresholds:
   ```bash
-  python examples/predict_and_signal.py \
+    python examples/predict_and_signal.py \
     --model-path models/btc_lgb.pkl \
-    --features-path data/features/btc_1h_features.parquet \
-    --output-path signals/btc_signals.parquet \
+    --features-path data/features/features_btc_1h.parquet \
+    --output-path signals/btc_signals.parquet\
     --config cfg/signal_thresholds.yaml
   ```
 

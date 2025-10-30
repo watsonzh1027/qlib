@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from features.crypto_workflow.train_utils import LGBModel
 from features.crypto_workflow.model_io import save_model
-from qlib.utils.io import write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +25,17 @@ def train_model(feature_path: Path, model_path: Path) -> None:
 
 def train_from_features(
     features_path: str,
-    model_dir: str,
-    model_name: Optional[str] = None,
+    model_out: str,
+    report_out: str,
     params: Optional[Dict[str, Any]] = None,
     early_stopping_rounds: int = 50,
 ):
     """Load features parquet, build simple target, train LightGBM and save model + report."""
     features_path = Path(features_path)
-    model_dir = Path(model_dir)
-    model_dir.mkdir(parents=True, exist_ok=True)
+    model_out = Path(model_out)
+    report_out = Path(report_out)
+    model_out.parent.mkdir(parents=True, exist_ok=True)
+    report_out.parent.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_parquet(str(features_path))
     # Expect returns column; build binary target: next-period positive return
@@ -76,8 +77,7 @@ def train_from_features(
     )
 
     # Persist model via model_io.save_model (atomic)
-    model_name = model_name or f"lgb_model_{features_path.stem}"
-    model_path = model_dir / f"{model_name}.joblib"
+    model_name = model_out.stem
     metadata = {
         "model_name": model_name,
         "params": model.params,
@@ -85,33 +85,32 @@ def train_from_features(
         "symbol": None,
         "timeframe": None,
     }
-    save_model(model, str(model_path), metadata=metadata)
+    save_model(model, str(model_out), metadata=metadata)
 
     # Save simple training report
     report = {
-        "model_path": str(model_path),
+        "model_path": str(model_out),
         "metrics": metrics,
         "train_rows": len(X_train),
         "val_rows": len(X_val),
         "test_rows": len(X_test),
     }
-    report_path = model_dir / f"{model_name}_train_report.json"
-    with open(report_path, "w") as f:
+    with open(report_out, "w") as f:
         json.dump(report, f, indent=2)
 
-    logger.info(f"Trained model saved to {model_path}")
-    logger.info(f"Training report saved to {report_path}")
-    return {"model_path": str(model_path), "report_path": str(report_path), "metrics": metrics}
+    logger.info(f"Trained model saved to {model_out}")
+    logger.info(f"Training report saved to {report_out}")
+    return {"model_path": str(model_out), "report_path": str(report_out), "metrics": metrics}
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--features-path", required=True, help="Path to features parquet")
-    parser.add_argument("--model-dir", required=True, help="Directory to save model")
-    parser.add_argument("--model-name", default=None, help="Optional model name")
+    parser.add_argument("--features", required=True, help="Path to features parquet")
+    parser.add_argument("--model-out", required=True, help="Path to save model")
+    parser.add_argument("--report-out", required=True, help="Path to save training report")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    train_from_features(args.features_path, args.model_dir, args.model_name)
+    train_from_features(args.features, args.model_out, args.report_out)
 
 if __name__ == "__main__":
     main()

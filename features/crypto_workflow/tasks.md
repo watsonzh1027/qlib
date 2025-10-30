@@ -45,9 +45,9 @@ Primary user stories (derived):
 - [X] T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/watson/work/qlib/tests/test_backtest.py
 
 ## Final Phase — Polish & Cross-cutting concerns
-- [ ] T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
-- [ ] T024 Add basic CI job snippet to run tests and format checks: .github/workflows/feature-crypto-workflow.yml
-- [ ] T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto_workflow/config_defaults.md
+- [X] T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
+- [X] T024 Add basic CI job snippet to run tests and format checks: .github/workflows/feature-crypto-workflow.yml
+- [X] T025 [P] Document assumptions and configuration defaults in /home/watson/work/qlib/features/crypto_workflow/config_defaults.md
 
 ## TDD — Tests for each development task (ensure TDD for all implementation work)
 
@@ -236,16 +236,17 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-Current Progress: 22/25 tasks completed (88%)
+Current Progress: 25/25 tasks completed (100%)
 Latest completed:
+- T025: Configuration defaults documented (features/crypto_workflow/config_defaults.md)
+- T024: CI workflow added (.github/workflows/feature-crypto-workflow.yml)
+- T023: Quickstart guide added (features/crypto_workflow/quickstart.md)
 - T022: Backtest smoke test executed and validated (tests/test_backtest.py)
 - T021: Backtest report serializer with visualization
 - T020: Backtest harness implemented and tested (examples/backtest.py)
 
 ## Next immediate actions (updated)
-1. Complete documentation and CI setup:
-   - T023: Update quickstart.md with concrete example commands
-   - T024: Add basic CI job snippet to run tests and format checks
-   - T025: Document assumptions and configuration defaults (config_defaults.md)
-2. Minor polish, ensure all tests pass in CI and add any missing docs.
+1. Run full test suite and ensure CI passes (linting, tests, coverage).
+2. Address any failing tests or coverage gaps; iterate on polish and documentation.
+3. Create small PRs per logical unit and request review.
 
