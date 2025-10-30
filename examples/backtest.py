@@ -117,11 +117,17 @@ class Backtester:
         trades = df[df['trade'] != 0.0][['position','trade','pnl','equity']]
         trades = trades.reset_index().rename(columns={'index':'ts'})
 
+        # Ensure 'ts' column exists in equity_curve
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={'index': 'ts'})
+        else:
+            df = df.reset_index().rename(columns={'timestamp': 'ts'})
+
         result = {
             'metrics': metrics,
-            'equity_curve': df[['equity']].reset_index().rename(columns={'index':'ts'}),
+            'equity_curve': df[['equity', 'ts']],
             'trades': trades,
-            'detailed': df.rename_axis('ts').reset_index()
+            'detailed': df
         }
 
         # Save metrics to file if output_dir is provided
