@@ -41,8 +41,8 @@ Primary user stories (derived):
 
 ### US4 (P2): Backtest harness and reporting
 - [X] T020 [US4] Implement backtest harness: /home/watson/work/qlib/examples/backtest.py (ingest signals + OHLCV, apply slippage/fees, compute metrics)
-- [ ] T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto_workflow/backtest_report.py
-- [ ] T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/watson/work/qlib/tests/test_backtest.py
+- [X] T021 [US4] Implement backtest report serializer: /home/watson/work/qlib/features/crypto_workflow/backtest_report.py
+- [X] T022 [US4] Add backtest smoke test (run with small synthetic data) in /home/watson/work/qlib/tests/test_backtest.py
 
 ## Final Phase — Polish & Cross-cutting concerns
 - [ ] T023 Update quickstart.md with concrete example commands: /home/watson/work/qlib/features/crypto_workflow/quickstart.md
@@ -236,7 +236,16 @@ T025 [P] Document assumptions and configuration defaults in /home/watson/work/ql
 - Use feature branch naming: feature/crypto-workflow/<task-number>-<short-desc>.
 
 ## Status tracking
-Current Progress: 20/25 tasks completed (80%)
+Current Progress: 22/25 tasks completed (88%)
 Latest completed:
-- T020: Backtest harness implemented (examples/backtest.py)
+- T022: Backtest smoke test executed and validated (tests/test_backtest.py)
+- T021: Backtest report serializer with visualization
+- T020: Backtest harness implemented and tested (examples/backtest.py)
+
+## Next immediate actions (updated)
+1. Complete documentation and CI setup:
+   - T023: Update quickstart.md with concrete example commands
+   - T024: Add basic CI job snippet to run tests and format checks
+   - T025: Document assumptions and configuration defaults (config_defaults.md)
+2. Minor polish, ensure all tests pass in CI and add any missing docs.
 

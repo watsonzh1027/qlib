@@ -1,60 +1,90 @@
-# Crypto Trading Workflow Quickstart Guide
+# Crypto Workflow Quickstart
+
+This quickstart shows example commands for the end-to-end flow: collect → preprocess → train → predict → backtest.
 
 ## Prerequisites
-```bash
-pip install ccxt lightgbm pandas numpy pytest
-```
+- Python 3.9+ and dev environment activated (e.g. conda env named `qlib`)
+- ccxt configured for OKX (API key/secret) if doing live collection
+- project root is /home/watson/work/qlib
 
-## Data Collection
-```bash
-# Collect 15-minute OHLCV data for BTC-USDT
-python examples/collect_okx_ohlcv.py \
-  --symbol BTC-USDT \
-  --interval 15min \
-  --start 2024-01-01 \
-  --end 2024-01-31 \
-  --output data/raw/okx/BTC-USDT/15min/
-```
+## Example commands (dry-run / test-mode friendly):
 
-## Feature Generation
-```bash
-# Preprocess raw data and generate features
-python examples/preprocess_features.py \
-  --input data/raw/okx/BTC-USDT/15min/ \
-  --output features/BTC-USDT/15min/v1/ \
-  --start 2024-01-01 \
-  --end 2024-01-31
-```
+### 1) Collect OHLCV (dry-run / short range)
+- Dry-run (no API keys, mocked fetch):
+  ```bash
+  python examples/collect_okx_ohlcv.py \
+    --symbol BTC/USDT \
+    --timeframe 1h \
+    --start 2024-01-01 \
+    --end 2024-01-02 \
+    --output /tmp/btc_1h.parquet \
+    --dry-run
+  ```
 
-## Model Training
-```bash
-# Train LightGBM model
-python examples/train_lgb.py \
-  --features features/BTC-USDT/15min/v1/ \
-  --model-output models/BTC-USDT/15min/v1.bin \
-  --train-start 2024-01-01 \
-  --train-end 2024-01-25 \
-  --val-start 2024-01-26 \
-  --val-end 2024-01-31
-```
+- Real run (with OKX keys in env):
+  ```bash
+  export OKX_API_KEY=xxxx
+  export OKX_API_SECRET=yyyy
+  python examples/collect_okx_ohlcv.py \
+    --symbol BTC/USDT \
+    --timeframe 1h \
+    --start 2024-01-01 \
+    --end 2024-02-01 \
+    --output data/ohlcv/btc_1h.parquet
+  ```
 
-## Signal Generation
-```bash
-# Generate trading signals
-python examples/predict_and_signal.py \
-  --model models/BTC-USDT/15min/v1.bin \
-  --data features/BTC-USDT/15min/v1/ \
-  --output signals/BTC-USDT/15min/v1/
-```
+### 2) Preprocess features
+- Run featurization (align, fill, compute MA/RSI):
+  ```bash
+  python examples/preprocess_features.py \
+    --input data/ohlcv/btc_1h.parquet \
+    --output data/features/btc_1h_features.parquet
+  ```
 
-## Backtesting
-```bash
-# Run backtest
-python examples/backtest.py \
-  --signals signals/BTC-USDT/15min/v1/ \
-  --market-data data/raw/okx/BTC-USDT/15min/ \
-  --output backtest/BTC-USDT/15min/v1/report.json
-```
+### 3) Train LightGBM model (dry-run with small dataset)
+- Train and save model + report:
+  ```bash
+  python examples/train_lgb.py \
+    --features data/features/btc_1h_features.parquet \
+    --model-out models/btc_lgb.pkl \
+    --report-out reports/train_btc.json \
+    --dry-run
+  ```
+
+### 4) Predict & generate signals
+- Load model and generate signals:
+  ```bash
+  python examples/predict_and_signal.py \
+    --model-path models/btc_lgb.pkl \
+    --features-path data/features/btc_1h_features.parquet \
+    --output-path signals/btc_signals.parquet
+  ```
+
+- Use config for thresholds:
+  ```bash
+  python examples/predict_and_signal.py \
+    --model-path models/btc_lgb.pkl \
+    --features-path data/features/btc_1h_features.parquet \
+    --output-path signals/btc_signals.parquet \
+    --config cfg/signal_thresholds.yaml
+  ```
+
+### 5) Backtest
+- Run backtest using OHLCV + signals:
+  ```bash
+  python examples/backtest.py \
+    --signals signals/btc_signals.parquet \
+    --ohlcv data/ohlcv/btc_1h.parquet \
+    --output reports/backtest_btc \
+    --slippage 0.0005 \
+    --fee 0.00075
+  ```
+
+## Notes and tips
+- Use `--dry-run` or small time ranges for quick smoke tests.
+- Store API keys in environment variables (OKX_API_KEY, OKX_API_SECRET) or use a secrets manager — do NOT commit keys.
+- For CI/tests, mock exchange calls (see tests/) to avoid external network calls.
+- Output locations: data/, models/, reports/, signals/ under repo root by default.
 
 ## Directory Structure
 ```
