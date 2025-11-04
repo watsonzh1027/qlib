@@ -31,7 +31,7 @@ def get_okx_funding_top50() -> list[str]:
         # Convert to DataFrame
         data = []
         for symbol, info in funding_rates.items():
-            if symbol.endswith(':USDT') or '/USDT' in symbol:  # Perpetual swaps
+            if symbol.endswith(':USDT'):  # Only perpetual swaps
                 data.append({
                     'symbol': symbol,
                     'funding_rate': info.get('fundingRate', 0),
@@ -51,14 +51,11 @@ def get_okx_funding_top50() -> list[str]:
         # Sort by absolute funding rate descending
         df = df.sort_values('funding_rate', ascending=False).head(50)
         
-        # Extract symbols (CCXT format is BTC/USDT:USDT for perpetuals, but we want BTC/USDT)
+        # Extract symbols (CCXT perpetual format is BTC/USDT:USDT, we want BTC/USDT)
         symbols = []
         for sym in df['symbol']:
-            if ':USDT' in sym:
-                base = sym.split(':')[0]
-                symbols.append(f"{base}/USDT")
-            else:
-                symbols.append(sym)
+            base = sym.split(':')[0]  # Remove :USDT suffix
+            symbols.append(base)
         
         logger.info(f"Selected top 50 symbols by funding rate: {symbols[:5]}...")
         return symbols

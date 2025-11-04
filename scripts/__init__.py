@@ -1,1 +1,1 @@
-# Empty __init__.py to make scripts a package
+# Empty file to make scripts a package

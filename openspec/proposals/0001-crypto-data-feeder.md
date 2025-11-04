@@ -9,7 +9,7 @@
 
 ## Summary
 
-Add a comprehensive data collection module that automatically fetches real-time cryptocurrency data from OKX exchange (top 50 coins by funding rate) using `cryptofeed` and `ccxt`, stores it locally in Parquet format, and converts it to Qlib-compatible format for quantitative strategy research. Includes both scheduled updates and an on-demand update method for immediate data fetching.
+Add a comprehensive data collection module that automatically fetches real-time cryptocurrency data from OKX exchange (top 50 coins by funding rate) using `ccxt` and `ccxtpro`, stores it locally in Parquet format, and converts it to Qlib-compatible format for quantitative strategy research. Includes both scheduled updates and an on-demand update method for immediate data fetching.
 
 ---
 
@@ -57,11 +57,10 @@ This proposal establishes a production-ready data pipeline that enables:
 ┌─────────────────────────────────────────────────────────────┐
 │                     Data Collection Layer                    │
 ├─────────────────────────────────────────────────────────────┤
-│  OKX API via CCXT          │  OKX WebSocket (cryptofeed)     │
+│  OKX API via CCXT          │  OKX WebSocket (ccxtpro)        │
 │  - Fetch funding rates     │  - Real-time candles (15m)      │
 │  - Rank by abs(FR)         │  - Funding rate updates         │
-│  - Select top 50           │  - Tick-level trades (optional) │
-│  - On-demand latest data   │                                 │
+│  - Select top 50           │  - On-demand latest data        │
 └──────────┬──────────────┴──────────────┬────────────────────┘
            │                             │
            ▼                             ▼
@@ -122,7 +121,7 @@ def load_symbols(path: str) -> List[str]:
 
 #### 2. Real-time Data Collector (`scripts/okx_data_collector.py`)
 
-**Responsibility**: Subscribe to OKX WebSocket feeds via `cryptofeed`, persist to Parquet. Includes on-demand update capability.
+**Responsibility**: Subscribe to OKX WebSocket feeds via `ccxtpro`, persist to Parquet. Includes on-demand update capability.
 
 **Key Features**:
 - Async event-driven architecture (uses `asyncio`)
@@ -132,9 +131,9 @@ def load_symbols(path: str) -> List[str]:
 - **On-demand update method**: Fetch latest data immediately when called
 
 **Data Channels**:
-1. **CANDLES** (15-minute) - Primary
-2. **FUNDING** - Every 8 hours
-3. **TRADES** (Optional) - For tick reconstruction
+1. **OHLCV** (15-minute) - Primary
+2. **Funding Rate** - Every 8 hours
+3. **Trades** (Optional) - For tick reconstruction
 
 **On-Demand Update Method**:
 ```python
@@ -230,10 +229,10 @@ ETHUSDT	ETH-USDT	SH000000
 
 ### Phase 1: Core Data Collection (Week 1)
 - [x] Implement `scripts/get_top50.py` with OKX API integration (via CCXT)
-- [ ] Create `scripts/okx_data_collector.py` with cryptofeed
+- [x] Write unit tests for symbol selection logic
+- [ ] Create `scripts/okx_data_collector.py` with ccxtpro
 - [ ] Add Parquet storage with proper schema
 - [ ] Implement `update_latest_data()` method for on-demand fetching
-- [x] Write unit tests for symbol selection logic
 - [ ] Test with 5 symbols for 24 hours
 
 **Deliverables**:
@@ -274,7 +273,7 @@ tests/
 ### Modified Files
 
 ```text
-requirements.txt              # Add cryptofeed, pyarrow, ccxt
+requirements.txt              # Add cryptofeed, pyarrow, ccxt, ccxtpro
 README.md                     # Add setup instructions
 docs/data_feeder.md           # Mark as implemented
 ```
@@ -289,6 +288,7 @@ cryptofeed>=2.4.0
 pyarrow>=12.0.0
 requests>=2.31.0
 ccxt>=4.0.0
+ccxtpro>=1.0.0
 pyyaml>=6.0
 APScheduler>=3.10.0  # Optional: for in-process scheduling
 ```
@@ -303,8 +303,7 @@ APScheduler>=3.10.0  # Optional: for in-process scheduling
 
 ## References
 
-- [cryptofeed Documentation](https://github.com/bmoscon/cryptofeed)
-- [CCXT Documentation](https://github.com/ccxt/ccxt)
+- [CCXT Pro Documentation](https://github.com/ccxt/ccxt/wiki/ccxt.pro)
 - [OKX API v5 Docs](https://www.okx.com/docs-v5/en/)
 - [Qlib Data Provider Guide](https://qlib.readthedocs.io/en/latest/component/data.html)
 - [Apache Parquet Format](https://parquet.apache.org/docs/)

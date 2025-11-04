@@ -7,12 +7,12 @@
 
 ## Phase 1: Core Data Collection (Week 1)
 
-- [ ] Implement `scripts/get_top50.py` with OKX API integration
-- [ ] Create `scripts/okx_data_collector.py` with cryptofeed
-- [ ] Add Parquet storage with proper schema
-- [ ] Implement `update_latest_data()` method for on-demand fetching
-- [ ] Write unit tests for symbol selection logic
-- [ ] Test with 5 symbols for 24 hours
+- [x] Implement `scripts/get_top50.py` with OKX API integration (via CCXT)
+- [x] Write unit tests for symbol selection logic
+- [x] Create `scripts/okx_data_collector.py` with cryptofeed
+- [x] Add Parquet storage with proper schema
+- [x] Implement `update_latest_data()` method for on-demand fetching
+- [x] Test with 5 symbols for 24 hours
 
 **Deliverables**:
 - Working data collector with on-demand update
@@ -65,7 +65,7 @@
 
 ## Dependencies
 
-- [ ] Update `requirements.txt` with new packages
+- [x] Update `requirements.txt` with new packages
 - [ ] Test package installations in qlib environment
 
 ---
