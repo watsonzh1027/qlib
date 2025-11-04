@@ -27,7 +27,7 @@ os.makedirs('logs', exist_ok=True)
 
 # Configure logging to both console and file
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -130,34 +130,40 @@ async def handle_funding_rate(exchange, symbol, funding_rate):
 
     return True
 
-def save_klines(symbol: str, base_dir: str = "data/klines") -> bool:
-    """
-    Save buffered klines for a symbol to a Parquet file.
-    Minimal implementation for tests:
-    - Uses module-level `klines` dict.
-    - Creates directory `base_dir/<symbol_safe>`, calls DataFrame.to_parquet (tests patch this).
-    - Clears the buffer for the symbol after saving.
-    """
-    global klines
-    if klines is None:
-        klines = {}
+def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None) -> bool:
+	"""
+	Save buffered klines for a symbol to a Parquet file.
+	- If `entries` is provided, save those rows directly.
+	- Otherwise use module-level `klines[symbol]` buffer (existing behavior).
+	- Clears the buffer only when buffer was used.
+	"""
+	global klines
+	if klines is None:
+		klines = {}
 
-    entries = klines.get(symbol)
-    if not entries:
-        return False
+	# If explicit entries provided, use them; otherwise take from buffer
+	use_buffer = False
+	if entries is None:
+		entries = klines.get(symbol)
+		use_buffer = True
 
-    df = pd.DataFrame(entries)
-    symbol_safe = symbol.replace("/", "_")
-    dirpath = os.path.join(base_dir, symbol_safe)
-    os.makedirs(dirpath, exist_ok=True)
-    filepath = os.path.join(dirpath, f"{symbol_safe}.parquet")
+	if not entries:
+		return False
 
-    # Call the DataFrame to_parquet; tests will patch this method.
-    df.to_parquet(filepath, index=False)
+	# entries should be a list of dicts; accept DataFrame-like too in future
+	df = pd.DataFrame(entries)
+	symbol_safe = symbol.replace("/", "_")
+	dirpath = os.path.join(base_dir, symbol_safe)
+	os.makedirs(dirpath, exist_ok=True)
+	filepath = os.path.join(dirpath, f"{symbol_safe}.parquet")
 
-    # Clear buffer after saving
-    klines[symbol] = []
-    return True
+	# Call the DataFrame to_parquet; tests will patch this method.
+	df.to_parquet(filepath, index=False)
+
+	# Clear buffer after saving only if we used the module buffer
+	if use_buffer:
+		klines[symbol] = []
+	return True
 
 def load_symbols(path: str = CONFIG_PATH) -> List[str]:
     """Load symbols from config file."""
@@ -183,6 +189,7 @@ def update_latest_data(symbols: List[str] = None) -> Dict[str, pd.DataFrame]:
         symbols = load_symbols()
     
     result = {}
+    logger.debug(f"Updating latest data for {len(symbols)} symbols: {symbols[:5]}...")
     
     for symbol in symbols:
         try:
@@ -211,13 +218,13 @@ def update_latest_data(symbols: List[str] = None) -> Dict[str, pd.DataFrame]:
                     'interval': '15m'
                 }])
                 result[symbol] = df
-                
-                # Also save to Parquet if needed
-                save_klines(symbol)
-                
+
+                # Save immediately: pass explicit entries so save_klines writes even if buffer is empty
+                save_klines(symbol, base_dir="data/klines", entries=df.to_dict(orient='records'))
         except Exception as e:
             logger.error(f"Failed to update {symbol}: {e}")
     
+    logger.debug(f"Update complete,result: {result}")
     return result
 
 async def main():

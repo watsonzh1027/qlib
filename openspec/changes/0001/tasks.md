@@ -78,6 +78,14 @@
 
 ---
 
+## Implementation notes
+
+- [x] Read and will follow `./.github/prompts/openspec-apply.prompt.md` workflow for implementing this change:
+  - Follow Steps 1–5 in the prompt (read proposal & tasks → implement tasks sequentially → run tests → update checklist → update issue records).
+  - Work focused on one primary problem at a time and append progress to the existing issue file for this proposal.
+
+---
+
 **Completion Criteria**:
 - All tasks checked off
 - Unit tests pass
