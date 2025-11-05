@@ -155,6 +155,26 @@ class TestGetTop50:
             symbols = load_symbols(filepath)
             
             assert symbols == []
+    
+    @patch('ccxt.okx')
+    def test_get_okx_funding_top50_integration(self, mock_okx_class):
+        """Test integration of get_okx_funding_top50 with actual OKX exchange (mocked)."""
+        mock_exchange = MagicMock()
+        mock_okx_class.return_value = mock_exchange
+        
+        # Mocking a realistic response from OKX
+        mock_funding_rates = {
+            'BTC/USDT:USDT': {'fundingRate': 0.0001, 'nextFundingTime': 1640995200000},
+            'ETH/USDT:USDT': {'fundingRate': -0.0002, 'nextFundingTime': 1640995200000},
+            # ... up to 50 symbols
+        }
+        mock_exchange.fetch_funding_rates.return_value = mock_funding_rates
+        
+        result = get_okx_funding_top50()
+        
+        assert result["count"] == 50
+        assert len(result["symbols"]) == 50
+        assert all("symbol" in item for item in result["symbols"])
 
 if __name__ == "__main__":
     pytest.main([__file__])

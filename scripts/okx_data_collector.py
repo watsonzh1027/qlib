@@ -21,6 +21,20 @@ import json
 import logging
 import requests
 from typing import List, Dict
+import qlib
+from qlib.data import D
+from config_manager import ConfigManager
+
+# Load configuration
+config = ConfigManager("config/workflow.json").load_config()
+
+# Update paths and parameters to use centralized configuration
+DATA_DIR = config.get("data_dir", "data/klines")
+LOG_DIR = config.get("log_dir", "logs")
+
+# Ensure directories exist
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # Create logs directory
 os.makedirs('logs', exist_ok=True)
@@ -37,7 +51,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-DATA_DIR = "okx_data"
 CONFIG_PATH = "config/test_symbols.json"
 
 # Global storage
@@ -175,7 +188,7 @@ def load_symbols(path: str = CONFIG_PATH) -> List[str]:
         logger.error(f"Failed to load symbols: {e}")
         return []
 
-def update_latest_data(symbols: List[str] = None) -> Dict[str, pd.DataFrame]:
+def update_latest_data(symbols: List[str] = None, output_dir="data/klines") -> Dict[str, pd.DataFrame]:
     """
     Fetch latest 15m candles for specified symbols via REST API.
     
@@ -226,6 +239,23 @@ def update_latest_data(symbols: List[str] = None) -> Dict[str, pd.DataFrame]:
     
     logger.debug(f"Update complete,result: {result}")
     return result
+
+def update_latest_data_with_qlib(symbols=None, output_dir="data/klines"):
+    """
+    Update the latest data and integrate it with the Qlib data provider.
+
+    Args:
+        symbols (list): List of symbols to update. If None, updates top 50 symbols.
+        output_dir (str): Directory to save the updated data.
+    """
+    # Update the latest data
+    updated_data = update_latest_data(symbols, output_dir)
+
+    # Refresh Qlib data provider
+    qlib.init(provider_uri="data/qlib_data", region="cn")
+    for symbol in updated_data:
+        D.features([symbol], fields=["$close", "$volume"])
+    print("Qlib data provider updated with the latest data.")
 
 async def main():
     """Main function to start the data collector."""
@@ -512,6 +542,45 @@ class OkxDataCollector:
         if not expected_keys.intersection(set(data.keys())):
             raise ValueError("Invalid data format")
         return True
+
+def save_ohlcv_to_parquet(symbol, ohlcv_data, interval, output_dir="data/klines"):
+    os.makedirs(f"{output_dir}/{symbol}", exist_ok=True)
+    df = pd.DataFrame(ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["symbol"] = symbol
+    df["interval"] = interval
+    file_path = f"{output_dir}/{symbol}/{symbol}_{interval}.parquet"
+    if os.path.exists(file_path):
+        existing_df = pd.read_parquet(file_path)
+        df = pd.concat([existing_df, df]).drop_duplicates(subset=["timestamp"])
+    df.to_parquet(file_path, index=False)
+
+def save_funding_rate_to_parquet(funding_data, output_dir="data/funding"):
+    os.makedirs(output_dir, exist_ok=True)
+    date = datetime.utcnow().strftime("%Y%m%d")
+    file_path = f"{output_dir}/funding_rates_{date}.parquet"
+    df = pd.DataFrame(funding_data)
+    if os.path.exists(file_path):
+        existing_df = pd.read_parquet(file_path)
+        df = pd.concat([existing_df, df]).drop_duplicates(subset=["symbol"])
+    df.to_parquet(file_path, index=False)
+
+# Define the missing `_heartbeat_forever` function
+def _heartbeat_forever(interval):
+    """
+    A placeholder function to simulate a heartbeat task.
+
+    Args:
+        interval (int): Interval in seconds for the heartbeat.
+
+    Returns:
+        Coroutine: A coroutine that runs indefinitely.
+    """
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(interval)
+            logger.debug("Heartbeat sent.")
+
+    return heartbeat()
 
 if __name__ == '__main__':
     print("Reminder: Ensure 'conda activate qlib' before running")

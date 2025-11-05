@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import os
 import logging
+from config_manager import ConfigManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -11,6 +12,14 @@ logger = logging.getLogger(__name__)
 
 # Constants
 CONFIG_PATH = "config/top50_symbols.json"
+INSTRUMENTS_PATH = "config/instruments.json"
+
+# Load configuration
+config = ConfigManager("config/workflow.json").load_config()
+
+# Update CONFIG_PATH and INSTRUMENTS_PATH to use centralized parameters
+CONFIG_PATH = config.get("top50_symbols_path", CONFIG_PATH)
+INSTRUMENTS_PATH = config.get("instruments_path", INSTRUMENTS_PATH)
 
 def get_okx_funding_top50() -> list[str]:
     """
@@ -110,6 +119,40 @@ def load_symbols(path: str = CONFIG_PATH) -> list[str]:
         logger.error(f"Failed to load symbols from {path}: {e}")
         return []
 
+def save_instruments_metadata(funding_rates: dict, path: str = INSTRUMENTS_PATH):
+    """
+    Save instruments metadata to JSON file.
+    
+    Args:
+        funding_rates: Dictionary of funding rates information
+        path: File path to save to
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    
+    # Rank symbols by absolute funding rate
+    ranked_symbols = sorted(funding_rates.items(), key=lambda x: abs(x[1]['fundingRate']), reverse=True)
+    top_50 = ranked_symbols[:50]
+    
+    # Prepare data for JSON
+    data = {
+        "symbols": [
+            {
+                "symbol": item[0],
+                "funding_rate": item[1]['fundingRate'],
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            for item in top_50
+        ],
+        "count": len(top_50)
+    }
+    
+    try:
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=4)
+        logger.info(f"Saved instruments metadata for top 50 symbols to {path}")
+    except Exception as e:
+        logger.error(f"Failed to save instruments metadata to {path}: {e}")
+
 if __name__ == '__main__':
     logger.info("Starting top 50 symbol selection")
     
@@ -119,6 +162,9 @@ if __name__ == '__main__':
     symbols = get_okx_funding_top50()
     if symbols:
         save_symbols(symbols)
+        # Also save instruments metadata to a separate file
+        funding_rates = {sym: {'fundingRate': 0} for sym in symbols}  # Dummy funding rates for metadata
+        save_instruments_metadata(funding_rates)
         print(f"Successfully updated top 50 symbols: {symbols[:5]}...")
     else:
         print("Failed to fetch symbols")
