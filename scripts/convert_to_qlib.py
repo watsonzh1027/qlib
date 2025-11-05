@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from config_manager import ConfigManager
+from .config_manager import ConfigManager
 
 # Load configuration
 config = ConfigManager("config/workflow.json").load_config()

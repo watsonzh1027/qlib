@@ -58,3 +58,38 @@ When suggesting code changes:
 - Always consider the qlib environment context
 - Verify compatibility with qlib framework
 - Follow the focused resolution and error fixing scope principles
+
+## Project Architecture
+
+### Major Components
+- **qlib**: Core library for data handling, modeling, and backtesting.
+- **scripts**: Contains executable scripts for running experiments, data collection, and backtesting.
+- **tests**: Includes unit tests, integration tests, and end-to-end tests to ensure code quality.
+- **data**: Stores datasets used for backtesting and experiments.
+- **docs**: Documentation for developers and users, including tutorials and FAQs.
+
+### Data Flow
+- Data is loaded using `DataHandler` classes, processed through `Processors`, and passed to models for training and prediction.
+- Backtesting involves generating signals, applying strategies, and analyzing portfolio performance.
+
+## Developer Workflows
+
+### Running Tests
+- Use the following command to run all tests:
+  ```bash
+  pytest tests/
+  ```
+- To check test coverage:
+  ```bash
+  pytest --cov=qlib tests/
+  ```
+
+### Debugging
+- Use the `issues/` directory to document and track debugging progress.
+- Follow the focused resolution principles outlined above.
+
+ 
+
+## Examples
+- Refer to `scripts/sample_backtest.py` for an example of running a backtest.
+- Check `tests/` for examples of unit and integration tests.

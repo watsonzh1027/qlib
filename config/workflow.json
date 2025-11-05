@@ -3,7 +3,7 @@
     {
         "csv_data_dir": "data/klines",
         "bin_data_dir": "data/qlib_data",
-        "symbols": "config/instruments.json"
+        "symbols": "config/top50_symbols.json"
     },
   "data_collection": {
     "interval": "15m",

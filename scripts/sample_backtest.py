@@ -8,7 +8,7 @@ from qlib.data.dataset import DatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.model.base import Model
 from qlib.data.dataset.loader import QlibDataLoader  # Import QlibDataLoader
-from config_manager import ConfigManager
+from .config_manager import ConfigManager
 
 class SimpleModel(Model):
     """

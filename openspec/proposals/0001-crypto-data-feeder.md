@@ -204,23 +204,23 @@ ETHUSDT	ETH-USDT	SH000000
 ### Data Flow Diagram
 
 ```text
-[Every 8h] get_top50.py
+[Every 8h] scripts/get_top50.py
      ↓ (updates)
-  top50_symbols.json
+  config/instruments.json
      ↓ (reads)
-[Continuous] okx_data_collector.py
+[Continuous] scripts/okx_data_collector.py
      ↓ (writes)
-  okx_data/kline_15m/*.parquet
+  data/klines/{symbol}/{symbol}_15m.parquet
      ↓ (reads)
-[Daily 00:05] convert_to_qlib.py
+[Daily 00:05] scripts/convert_to_qlib.py
      ↓ (writes)
-  qlib_data/features/*.bin
+  data/qlib_data/features/*.bin
      ↓ (reads)
 [On-demand] Qlib Strategy Scripts
      ↓ (calls)
 [Immediate] update_latest_data()
      ↓ (updates)
-  okx_data/kline_15m/*.parquet
+  data/klines/{symbol}/{symbol}_15m.parquet
 ```
 
 ---

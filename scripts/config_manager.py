@@ -26,6 +26,16 @@ class ConfigManager:
             return 1000
         return value
 
+    def load_config(self):
+        """
+        Public method to reload and return the configuration.
+
+        Returns:
+            dict: The loaded configuration.
+        """
+        self.config = self._load_config()
+        return self.config
+
 # Example usage
 if __name__ == "__main__":
     config_manager = ConfigManager()

@@ -1,4 +1,8 @@
 import sys
+import os
+
+# Add the parent directory to the Python path to resolve relative imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Disable uvloop to avoid event loop conflicts
 sys.modules['uvloop'] = None
@@ -24,6 +28,7 @@ from typing import List, Dict
 import qlib
 from qlib.data import D
 from config_manager import ConfigManager
+import argparse
 
 # Load configuration
 config = ConfigManager("config/workflow.json").load_config()
@@ -50,8 +55,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants
-CONFIG_PATH = "config/test_symbols.json"
 
 # Global storage
 klines = {}
@@ -178,7 +181,10 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 		klines[symbol] = []
 	return True
 
-def load_symbols(path: str = CONFIG_PATH) -> List[str]:
+# Get symbols path from config
+SYMBOLS_PATH = config.get("data", {}).get("symbols", "config/top50_symbols.json")
+
+def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
     """Load symbols from config file."""
     try:
         with open(path, 'r') as f:
@@ -188,7 +194,7 @@ def load_symbols(path: str = CONFIG_PATH) -> List[str]:
         logger.error(f"Failed to load symbols: {e}")
         return []
 
-def update_latest_data(symbols: List[str] = None, output_dir="data/klines") -> Dict[str, pd.DataFrame]:
+def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None) -> Dict[str, pd.DataFrame]:
     """
     Fetch latest 15m candles for specified symbols via REST API.
     
@@ -211,7 +217,9 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines") -> D
             params = {
                 'instId': symbol.replace('/', '-'),  # BTC/USDT -> BTC-USDT
                 'bar': '15m',
-                'limit': 1  # Latest candle
+                'limit': args.limit,
+                'before': args.start_time,
+                'after': args.end_time
             }
             
             resp = requests.get(url, params=params, timeout=10)
@@ -219,25 +227,28 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines") -> D
             data = resp.json()
             
             if data.get('code') == '0' and data.get('data'):
-                candle = data['data'][0]
-                df = pd.DataFrame([{
-                    'symbol': symbol,
-                    'timestamp': int(candle[0]) // 1000,  # Convert ms to s
-                    'open': float(candle[1]),
-                    'high': float(candle[2]),
-                    'low': float(candle[3]),
-                    'close': float(candle[4]),
-                    'volume': float(candle[5]),
-                    'interval': '15m'
-                }])
+                candles = data['data']
+                df = pd.DataFrame([
+                    {
+                        'symbol': symbol,
+                        'timestamp': int(candle[0]) // 1000,  # Convert ms to s
+                        'open': float(candle[1]),
+                        'high': float(candle[2]),
+                        'low': float(candle[3]),
+                        'close': float(candle[4]),
+                        'volume': float(candle[5]),
+                        'interval': '15m'
+                    }
+                    for candle in candles
+                ])
                 result[symbol] = df
 
                 # Save immediately: pass explicit entries so save_klines writes even if buffer is empty
-                save_klines(symbol, base_dir="data/klines", entries=df.to_dict(orient='records'))
+                save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'))
         except Exception as e:
             logger.error(f"Failed to update {symbol}: {e}")
     
-    logger.debug(f"Update complete,result: {result}")
+    logger.debug(f"Update complete, result: {result}")
     return result
 
 def update_latest_data_with_qlib(symbols=None, output_dir="data/klines"):
@@ -257,7 +268,7 @@ def update_latest_data_with_qlib(symbols=None, output_dir="data/klines"):
         D.features([symbol], fields=["$close", "$volume"])
     print("Qlib data provider updated with the latest data.")
 
-async def main():
+async def main(args):
     """Main function to start the data collector."""
     logger.info("Starting OKX data collector")
 
@@ -267,6 +278,9 @@ async def main():
         return
 
     logger.info(f"Collecting data for {len(symbols)} symbols: {symbols[:5]}...")
+
+    # Update the latest data with the provided arguments
+    update_latest_data(symbols, output_dir="data/klines", args=args)
 
     # Create exchange instance: resolve ccxtpro/ccxt dynamically so tests can inject shims via sys.modules.
     exchange = None
@@ -313,7 +327,7 @@ async def main():
     if factory_source != 'ccxtpro':
         logger.warning(
             "Exchange factory did not come from ccxtpro (factory_source=%s). "
-            "Assuming no websocket support; falling back to REST polling.", factory_source
+            "Assuming no websocket support; falling back to REST polling", factory_source
         )
 
         import signal
@@ -582,6 +596,32 @@ def _heartbeat_forever(interval):
 
     return heartbeat()
 
+# Ensure the argument parser is defined in the global scope
+parser = argparse.ArgumentParser(description="OKX Data Collector")
+parser.add_argument(
+    "--start_time",
+    type=str,
+    default=config.get("data_collection", {}).get("start_time", "2025-01-01T00:00:00Z"),
+    help="Start time for data collection (e.g., 2025-01-01T00:00:00Z)"
+)
+parser.add_argument(
+    "--end_time",
+    type=str,
+    default=config.get("data_collection", {}).get("end_time", "2025-01-02T00:00:00Z"),
+    help="End time for data collection (e.g., 2025-01-02T00:00:00Z)"
+)
+parser.add_argument(
+    "--limit",
+    type=int,
+    default=config.get("data_collection", {}).get("limit", 100),
+    help="Number of data points to fetch per request"
+)
+
 if __name__ == '__main__':
     print("Reminder: Ensure 'conda activate qlib' before running")
-    asyncio.run(main())
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Pass the parsed arguments to the main function
+    asyncio.run(main(args))

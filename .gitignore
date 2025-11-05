@@ -13,11 +13,12 @@ dist/
 *.pkl
 *.hd5
 *.csv
-
+data/
 .env
 .vim
 .nvimrc
 .vscode
+*.bin
 
 qlib/VERSION.txt
 qlib/data/_libs/expanding.cpp
