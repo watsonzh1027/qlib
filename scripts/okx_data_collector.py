@@ -32,7 +32,7 @@ import requests
 from typing import List, Dict
 import qlib
 from qlib.data import D
-from config_manager import ConfigManager
+from .config_manager import ConfigManager
 import argparse
 
 # Load configuration
@@ -222,6 +222,10 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         logger.error(f"Failed to parse requested times: {e}")
         return requested_start, requested_end, True
 
+    # Ensure last_timestamp is also tz-naive for comparison
+    if last_timestamp is not None:
+        last_timestamp = last_timestamp.replace(tzinfo=None)
+
     # Get overlap configuration
     overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 15)
     overlap_delta = pd.Timedelta(minutes=overlap_minutes)
@@ -257,9 +261,9 @@ def load_existing_data(symbol: str, base_dir: str = "data/klines") -> pd.DataFra
 
     try:
         df = pd.read_csv(filepath)
-        # Convert timestamp to datetime, assuming unix seconds (most common case)
+        # Convert timestamp to datetime, handling both unix seconds and datetime strings
         if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
         return df
     except Exception as e:
         logger.warning(f"Failed to load existing data from {filepath}: {e}")
@@ -301,12 +305,13 @@ def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 15) -> bo
         logger.error(f"Error validating data continuity: {e}")
         return False
 
-def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None) -> bool:
+def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False) -> bool:
 	"""
 	Save buffered klines for a symbol to a Parquet file.
 	- If `entries` is provided, save those rows directly.
 	- Otherwise use module-level `klines[symbol]` buffer (existing behavior).
 	- Clears the buffer only when buffer was used.
+	- If append_only=True, assumes data can be safely appended without checking for duplicates
 	"""
 	global klines
 	if klines is None:
@@ -331,8 +336,29 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 	os.makedirs(dirpath, exist_ok=True)
 	filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
 
-	# Call the DataFrame to_parquet; tests will patch this method.
+	# If append_only mode and file exists, try to append new data
+	if append_only and os.path.exists(filepath):
+		try:
+			# Check if new data timestamps are all after existing data's last timestamp
+			existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir)
+			if existing_last_ts is not None:
+				new_min_ts = df['timestamp'].min()
+				if new_min_ts > existing_last_ts:
+					# Safe to append - convert to CSV format and append
+					csv_content = df.to_csv(index=False, header=False)
+					with open(filepath, 'a', newline='') as f:
+						f.write(csv_content)
+					logger.debug(f"Appended {len(df)} new rows to {filepath} (append_only mode)")
+					# Clear buffer after saving only if we used the module buffer
+					if use_buffer:
+						klines[symbol] = []
+					return True
+		except Exception as e:
+			logger.warning(f"Failed to append data for {symbol}, falling back to full rewrite: {e}")
+
+	# Fallback to full rewrite
 	df.to_csv(filepath, index=False)
+	logger.debug(f"Saved {len(df)} rows to {filepath}")
 
 	# Clear buffer after saving only if we used the module buffer
 	if use_buffer:
@@ -549,8 +575,28 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         # Validate data continuity
                         if not validate_data_continuity(combined_df):
                             logger.warning(f"Data continuity validation failed for {symbol} after merge")
-                        df = combined_df
-                        logger.info(f"Merged {len(existing_df)} existing + {len(all_candles)} new = {len(df)} total candles for {symbol}")
+
+                        # Check if we actually added new data
+                        original_count = len(existing_df)
+                        new_count = len(combined_df)
+                        if new_count > original_count:
+                            df = combined_df
+                            # Check if new data can be safely appended (all new timestamps > existing max)
+                            existing_max_ts = existing_df['timestamp'].max()
+                            new_min_ts = df['timestamp'].min()
+                            can_append = new_min_ts > existing_max_ts
+                            logger.info(f"Merged {original_count} existing + {len(all_candles)} new = {new_count} total candles for {symbol}")
+                            result[symbol] = df
+                            # Save with append mode if safe
+                            save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'), append_only=can_append)
+                            if can_append:
+                                logger.debug(f"Used append mode for {symbol} (safe to append)")
+                            continue  # Skip the general save below since we already saved
+                        else:
+                            logger.info(f"No new data added for {symbol} (all {len(all_candles)} candles were duplicates), skipping save")
+                            continue  # Skip saving if no new data was added
+                    else:
+                        logger.info(f"No existing data for {symbol}, saving {len(all_candles)} new candles")
 
                 result[symbol] = df
 
