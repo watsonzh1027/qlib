@@ -12,7 +12,11 @@ import asyncio
 # Set event loop policy
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-import ccxtpro
+# Try to import ccxtpro, but don't fail if not available
+try:
+    import ccxtpro
+except ImportError:
+    ccxtpro = None
 
 # Removed test-only placeholder that set ccxtpro.okx to a lambda returning None.
 # Tests should supply a test shim (e.g. tests/_vendor/ccxtpro) or monkeypatch ccxtpro.okx;
@@ -23,6 +27,7 @@ from datetime import datetime
 import os
 import json
 import logging
+import ccxt
 import requests
 from typing import List, Dict
 import qlib
@@ -146,6 +151,156 @@ async def handle_funding_rate(exchange, symbol, funding_rate):
 
     return True
 
+def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> pd.Timestamp | None:
+    """
+    Read the last timestamp from existing CSV file for a symbol.
+
+    Args:
+        symbol: Symbol name
+        base_dir: Base directory for CSV files
+
+    Returns:
+        Last timestamp as pd.Timestamp, or None if file doesn't exist or is empty
+    """
+    symbol_safe = symbol.replace("/", "_")
+    dirpath = os.path.join(base_dir, symbol_safe)
+    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+
+    if not os.path.exists(filepath):
+        return None
+
+    try:
+        # Read only the last few lines to get the latest timestamp
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+            if len(lines) <= 1:  # Only header or empty
+                return None
+
+            # Get the last data line
+            last_line = lines[-1].strip()
+            if not last_line:
+                return None
+
+            # Parse CSV line, timestamp is first column after symbol
+            parts = last_line.split(',')
+            if len(parts) < 2:
+                return None
+
+            # parts[0] is symbol, parts[1] is timestamp
+            timestamp_str = parts[1].strip()
+            return pd.to_datetime(timestamp_str)
+
+    except Exception as e:
+        logger.warning(f"Failed to read last timestamp from {filepath}: {e}")
+        return None
+
+def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines") -> tuple[str, str, bool]:
+    """
+    Calculate the optimal fetch window for a symbol based on existing data.
+
+    Args:
+        symbol: Symbol name
+        requested_start: Requested start time string
+        requested_end: Requested end time string
+        base_dir: Base directory for CSV files
+
+    Returns:
+        Tuple of (adjusted_start, adjusted_end, should_fetch)
+        should_fetch is False if no new data needed
+    """
+    last_timestamp = get_last_timestamp_from_csv(symbol, base_dir)
+
+    if last_timestamp is None:
+        # No existing data, fetch full range
+        return requested_start, requested_end, True
+
+    # Parse requested times
+    try:
+        req_start_ts = pd.Timestamp(requested_start).replace(tzinfo=None)
+        req_end_ts = pd.Timestamp(requested_end).replace(tzinfo=None)
+    except Exception as e:
+        logger.error(f"Failed to parse requested times: {e}")
+        return requested_start, requested_end, True
+
+    # Get overlap configuration
+    overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 15)
+    overlap_delta = pd.Timedelta(minutes=overlap_minutes)
+
+    # If existing data already covers the requested range, skip fetching
+    if last_timestamp >= req_end_ts:
+        logger.info(f"Symbol {symbol}: Existing data covers requested range, skipping fetch")
+        return requested_start, requested_end, False
+
+    # Adjust start time to last_timestamp - overlap to ensure continuity
+    adjusted_start = max(req_start_ts, last_timestamp - overlap_delta)
+
+    logger.info(f"Symbol {symbol}: Adjusting fetch window from {requested_start} to {adjusted_start.isoformat()}")
+    return adjusted_start.isoformat(), requested_end, True
+
+def load_existing_data(symbol: str, base_dir: str = "data/klines") -> pd.DataFrame | None:
+    """
+    Load existing data for a symbol from CSV file.
+
+    Args:
+        symbol: Symbol name
+        base_dir: Base directory for CSV files
+
+    Returns:
+        DataFrame with existing data, or None if file doesn't exist
+    """
+    symbol_safe = symbol.replace("/", "_")
+    dirpath = os.path.join(base_dir, symbol_safe)
+    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+
+    if not os.path.exists(filepath):
+        return None
+
+    try:
+        df = pd.read_csv(filepath)
+        # Convert timestamp to datetime, assuming unix seconds (most common case)
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+        return df
+    except Exception as e:
+        logger.warning(f"Failed to load existing data from {filepath}: {e}")
+        return None
+
+def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 15) -> bool:
+    """
+    Validate that data has no gaps in the timestamp sequence.
+
+    Args:
+        df: DataFrame with timestamp column
+        interval_minutes: Expected interval between timestamps
+
+    Returns:
+        True if data is continuous, False otherwise
+    """
+    if df.empty or 'timestamp' not in df.columns:
+        return False
+
+    try:
+        # Sort by timestamp
+        sorted_df = df.sort_values('timestamp').copy()
+        timestamps = sorted_df['timestamp'].dropna()
+
+        if len(timestamps) < 2:
+            return True  # Single point or empty is considered continuous
+
+        # Check for gaps larger than expected interval
+        expected_interval = pd.Timedelta(minutes=interval_minutes)
+        diffs = timestamps.diff().dropna()
+
+        max_gap = diffs.max()
+        if max_gap > expected_interval * 2:  # Allow some tolerance
+            logger.warning(f"Data gap detected: max gap {max_gap} > expected {expected_interval}")
+            return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Error validating data continuity: {e}")
+        return False
+
 def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None) -> bool:
 	"""
 	Save buffered klines for a symbol to a Parquet file.
@@ -168,13 +323,16 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 
 	# entries should be a list of dicts; accept DataFrame-like too in future
 	df = pd.DataFrame(entries)
+	# Convert timestamp to readable datetime string if not already datetime
+	if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+		df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
 	symbol_safe = symbol.replace("/", "_")
 	dirpath = os.path.join(base_dir, symbol_safe)
 	os.makedirs(dirpath, exist_ok=True)
-	filepath = os.path.join(dirpath, f"{symbol_safe}.parquet")
+	filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
 
 	# Call the DataFrame to_parquet; tests will patch this method.
-	df.to_parquet(filepath, index=False)
+	df.to_csv(filepath, index=False)
 
 	# Clear buffer after saving only if we used the module buffer
 	if use_buffer:
@@ -196,58 +354,219 @@ def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
 
 def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None) -> Dict[str, pd.DataFrame]:
     """
-    Fetch latest 15m candles for specified symbols via REST API.
-    
+    Fetch latest 15m candles for specified symbols via REST API within the given time range.
+
     Args:
         symbols: List of symbols, if None uses all from config
-        
+        output_dir: Directory to save the data
+        args: Arguments containing start_time, end_time, and limit
+
     Returns:
         Dict of symbol -> DataFrame with latest data
     """
     if symbols is None:
         symbols = load_symbols()
-    
+
+    # Handle None args by creating default args object
+    if args is None:
+        class DefaultArgs:
+            def __init__(self):
+                self.start_time = config.get("data_collection", {}).get("start_time", "2025-01-01T00:00:00Z")
+                self.end_time = config.get("data_collection", {}).get("end_time", pd.Timestamp.now().strftime("%Y-%m-%dT%H:%M:%SZ"))
+                self.limit = config.get("data_collection", {}).get("limit", 100)
+        args = DefaultArgs()
+
     result = {}
     logger.debug(f"Updating latest data for {len(symbols)} symbols: {symbols[:5]}...")
-    
+
+    # Parse time range
+    start_time = args.start_time
+    end_time = args.end_time
+
+    # Handle invalid end_time
+    try:
+        end_ts = int(pd.Timestamp(end_time).timestamp() * 1000)
+    except Exception as e:
+        logger.warning(f"Invalid end_time '{end_time}', using current time")
+        end_time_obj = pd.Timestamp.now()
+        end_time = end_time_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_ts = int(end_time_obj.timestamp() * 1000)
+
+    # Handle invalid start_time
+    try:
+        start_ts = int(pd.Timestamp(start_time).timestamp() * 1000)
+    except Exception as e:
+        logger.warning(f"Invalid start_time '{start_time}', using end_time - 30 days")
+        start_time_obj = pd.Timestamp(end_time) - pd.Timedelta(days=30)
+        start_time = start_time_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+        start_ts = int(start_time_obj.timestamp() * 1000)
+
+    # Check if incremental collection is enabled
+    enable_incremental = config.get("data_collection", {}).get("enable_incremental", True)
+
     for symbol in symbols:
         try:
-            # OKX REST API for candles
-            url = "https://www.okx.com/api/v5/market/candles"
-            params = {
-                'instId': symbol.replace('/', '-'),  # BTC/USDT -> BTC-USDT
-                'bar': '15m',
-                'limit': args.limit,
-                'before': args.start_time,
-                'after': args.end_time
-            }
-            
-            resp = requests.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            
-            if data.get('code') == '0' and data.get('data'):
-                candles = data['data']
-                df = pd.DataFrame([
-                    {
-                        'symbol': symbol,
-                        'timestamp': int(candle[0]) // 1000,  # Convert ms to s
-                        'open': float(candle[1]),
-                        'high': float(candle[2]),
-                        'low': float(candle[3]),
-                        'close': float(candle[4]),
-                        'volume': float(candle[5]),
-                        'interval': '15m'
-                    }
-                    for candle in candles
-                ])
+            # Calculate fetch window for this symbol if incremental is enabled
+            if enable_incremental:
+                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir)
+                if not should_fetch:
+                    logger.info(f"Skipping {symbol} - no new data needed")
+                    continue
+                symbol_start_time = adjusted_start
+                symbol_end_time = adjusted_end
+            else:
+                symbol_start_time = start_time
+                symbol_end_time = end_time
+
+            # Convert symbol-specific times to timestamps
+            try:
+                symbol_start_ts = int(pd.Timestamp(symbol_start_time).timestamp() * 1000)
+                symbol_end_ts = int(pd.Timestamp(symbol_end_time).timestamp() * 1000)
+            except Exception as e:
+                logger.error(f"Failed to parse adjusted times for {symbol}: {e}")
+                raise  # Exit on time parsing error
+
+            all_candles = []
+            current_since = symbol_start_ts  # Start from adjusted start_time
+            request_count = 0
+
+            logger.info(f"Fetching data for {symbol} from {symbol_start_time} to {symbol_end_time}")
+
+            # Initialize CCXT exchange
+            exchange = ccxt.okx({
+                'options': {
+                    'defaultType': 'swap',  # Use perpetual swaps
+                },
+            })
+
+            # Load markets to ensure symbol mapping
+            exchange.load_markets()
+
+            while True:
+                request_count += 1
+
+                logger.debug(f"Request {request_count} for {symbol}: since={current_since}, collected={len(all_candles)} candles")
+
+                try:
+                    # Use CCXT to fetch OHLCV data
+                    ohlcv = exchange.fetch_ohlcv(
+                        symbol,
+                        timeframe='15m',
+                        since=current_since,
+                        limit=min(args.limit, 300)  # OKX max limit is 300
+                    )
+
+                    if not ohlcv:
+                        logger.info(f"No more data available for {symbol} after {request_count} requests, collected {len(all_candles)} candles")
+                        break
+
+                    logger.debug(f"Received {len(ohlcv)} candles for {symbol}, timestamp range: {ohlcv[0][0]} to {ohlcv[-1][0]}")
+
+                    # Check if we're getting the same data repeatedly (API limitation)
+                    if request_count > 1 and ohlcv:
+                        # Compare with the last response to detect duplicates
+                        last_candle_ts = ohlcv[0][0]  # First candle timestamp in current response
+                        if 'last_response_first_ts' in locals() and last_response_first_ts == last_candle_ts:
+                            logger.info(f"API returning duplicate data for {symbol} (same first timestamp {last_candle_ts}), stopping collection at {request_count} requests, collected {len(all_candles)} candles")
+                            break
+                        last_response_first_ts = last_candle_ts
+
+                    # Convert candles and filter by time range
+                    processed_candles = []
+                    latest_ts = 0
+
+                    for candle in ohlcv:
+                        ts_ms = int(candle[0])
+                        ts_sec = ts_ms // 1000
+
+                        # Check if candle is within our time range
+                        if ts_ms > symbol_end_ts:
+                            # We've gone past the end time, stop fetching
+                            logger.debug(f"Reached end time boundary for {symbol} at timestamp {ts_ms}")
+                            break
+
+                        if ts_ms >= symbol_start_ts:  # Within range
+                            processed_candles.append({
+                                'symbol': symbol,
+                                'timestamp': ts_sec,
+                                'open': float(candle[1]),
+                                'high': float(candle[2]),
+                                'low': float(candle[3]),
+                                'close': float(candle[4]),
+                                'volume': float(candle[5]),
+                                'interval': '15m'
+                            })
+
+                            if ts_ms > latest_ts:
+                                latest_ts = ts_ms
+
+                    all_candles.extend(processed_candles)
+                    logger.debug(f"Processed {len(processed_candles)} candles within time range for {symbol}, total collected: {len(all_candles)}")
+
+                    # If we got fewer candles than requested or went past end time, we're done
+                    if len(ohlcv) < min(args.limit, 300) or any(int(candle[0]) > end_ts for candle in ohlcv):
+                        logger.info(f"Stopping data collection for {symbol}: got {len(ohlcv)} candles (limit: {min(args.limit, 300)}), collected {len(all_candles)} total")
+                        break
+
+                    # Check if we have valid latest timestamp to continue pagination
+                    if latest_ts == 0:
+                        logger.warning(f"No valid candles found in response for {symbol}, stopping to prevent infinite loop")
+                        break
+
+                    # Continue with the latest timestamp we got (go further forward in time)
+                    current_since = int(latest_ts) + 1  # Add 1ms to avoid overlap
+
+                    # Progress logging every 10 requests
+                    if request_count % 10 == 0:
+                        logger.info(f"Progress for {symbol}: {request_count} requests, {len(all_candles)} candles collected")
+
+                except ccxt.NetworkError as e:
+                    logger.error(f"Network error for {symbol}: {e}")
+                    break
+                except ccxt.ExchangeError as e:
+                    logger.error(f"Exchange error for {symbol}: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"Unexpected error for {symbol}: {e}")
+                    break
+
+            if all_candles:
+                df = pd.DataFrame(all_candles)
+                # Sort by timestamp ascending
+                df = df.sort_values('timestamp').reset_index(drop=True)
+
+                # If incremental, merge with existing data
+                if enable_incremental:
+                    existing_df = load_existing_data(symbol, output_dir)
+                    if existing_df is not None and not existing_df.empty:
+                        # Ensure both dataframes have datetime timestamps
+                        existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], errors='coerce')
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                        # Merge and deduplicate
+                        combined_df = pd.concat([existing_df, df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
+                        # Drop any rows with invalid timestamps
+                        combined_df = combined_df.dropna(subset=['timestamp'])
+                        # Validate data continuity
+                        if not validate_data_continuity(combined_df):
+                            logger.warning(f"Data continuity validation failed for {symbol} after merge")
+                        df = combined_df
+                        logger.info(f"Merged {len(existing_df)} existing + {len(all_candles)} new = {len(df)} total candles for {symbol}")
+
                 result[symbol] = df
+
+                logger.info(f"Successfully collected {len(all_candles)} candles for {symbol} in {request_count} requests")
 
                 # Save immediately: pass explicit entries so save_klines writes even if buffer is empty
                 save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'))
+            else:
+                logger.warning(f"No candles found for {symbol} in the specified time range")
+
         except Exception as e:
             logger.error(f"Failed to update {symbol}: {e}")
-    
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise  # Exit on any symbol processing error
+
     logger.debug(f"Update complete, result: {result}")
     return result
 
@@ -503,80 +822,7 @@ async def main(args):
             if asyncio.iscoroutine(res):
                 await res
 
-class OkxDataCollector:
-    """
-    Minimal collector used by unit tests:
-    - collect_data calls requests.get(...) so tests can mock requests.get to raise or return responses.
-    - Returns [] for empty/unexpected JSON responses.
-    - validate_data raises ValueError for invalid formats.
-    """
-    def __init__(self, base_url: str | None = None):
-        self.base_url = base_url or "https://api.okx.com"
 
-    def collect_data(self, symbol: str | None = None):
-        # Use a generic endpoint string — tests mock requests.get so URL doesn't matter.
-        url = f"{self.base_url}/dummy"
-        resp = requests.get(url)
-        # If requests.get raises, let exception propagate (tests expect this)
-
-        # Safely handle status_code that may be a MagicMock or non-int.
-        status = getattr(resp, "status_code", None)
-        status_int = None
-        if status is not None:
-            try:
-                # Try to coerce status to int (works for ints and objects with __int__).
-                status_int = int(status)
-            except Exception:
-                # If it cannot be coerced (e.g., MagicMock), ignore the status check.
-                status_int = None
-
-        if status_int is not None and status_int >= 400:
-            raise Exception(f"API error: status {status_int}")
-
-        try:
-            data = resp.json()
-        except Exception:
-            return []
-
-        if not data or not isinstance(data, dict):
-            return []
-
-        # Typical OKX response wraps payload under "data"; return that or empty list
-        payload = data.get("data")
-        if not payload:
-            return []
-        return payload
-
-    def validate_data(self, data):
-        # Tests pass invalid dicts like {"invalid": "format"} and expect ValueError
-        if not isinstance(data, dict):
-            raise ValueError("Invalid data: expected dict")
-        # require at least one expected key for a valid data dict
-        expected_keys = {"symbol", "timestamp", "open", "close"}
-        if not expected_keys.intersection(set(data.keys())):
-            raise ValueError("Invalid data format")
-        return True
-
-def save_ohlcv_to_parquet(symbol, ohlcv_data, interval, output_dir="data/klines"):
-    os.makedirs(f"{output_dir}/{symbol}", exist_ok=True)
-    df = pd.DataFrame(ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["symbol"] = symbol
-    df["interval"] = interval
-    file_path = f"{output_dir}/{symbol}/{symbol}_{interval}.parquet"
-    if os.path.exists(file_path):
-        existing_df = pd.read_parquet(file_path)
-        df = pd.concat([existing_df, df]).drop_duplicates(subset=["timestamp"])
-    df.to_parquet(file_path, index=False)
-
-def save_funding_rate_to_parquet(funding_data, output_dir="data/funding"):
-    os.makedirs(output_dir, exist_ok=True)
-    date = datetime.utcnow().strftime("%Y%m%d")
-    file_path = f"{output_dir}/funding_rates_{date}.parquet"
-    df = pd.DataFrame(funding_data)
-    if os.path.exists(file_path):
-        existing_df = pd.read_parquet(file_path)
-        df = pd.concat([existing_df, df]).drop_duplicates(subset=["symbol"])
-    df.to_parquet(file_path, index=False)
 
 # Define the missing `_heartbeat_forever` function
 def _heartbeat_forever(interval):
@@ -607,7 +853,7 @@ parser.add_argument(
 parser.add_argument(
     "--end_time",
     type=str,
-    default=config.get("data_collection", {}).get("end_time", "2025-01-02T00:00:00Z"),
+    default=config.get("data_collection", {}).get("end_time", pd.Timestamp.now().strftime("%Y-%m-%dT%H:%M:%SZ")),
     help="End time for data collection (e.g., 2025-01-02T00:00:00Z)"
 )
 parser.add_argument(

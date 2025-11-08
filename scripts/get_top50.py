@@ -217,57 +217,6 @@ def get_top50_by_marketcap() -> List[str]:
     filtered_symbols = filter_top_swap_symbols(marketcap_symbols, okx_contracts)
     return filtered_symbols
 
-def get_okx_funding_top50() -> list[str]:
-    """
-    Fetch all OKX perpetual swaps funding rates via CCXT, rank by absolute funding rate, return top 50 symbols.
-    
-    Returns:
-        List of symbol strings like ['BTC/USDT', 'ETH/USDT', ...]
-    """
-    try:
-        exchange = ccxt.okx()
-        # Fetch funding rates for all perpetual swaps
-        funding_rates = exchange.fetch_funding_rates()
-        
-        if not funding_rates:
-            logger.error("No funding rate data received from OKX via CCXT")
-            return []
-        
-        # Convert to DataFrame
-        data = []
-        for symbol, info in funding_rates.items():
-            if symbol.endswith(':USDT'):  # Only perpetual swaps
-                data.append({
-                    'symbol': symbol,
-                    'funding_rate': info.get('fundingRate', 0),
-                    'next_funding_time': info.get('nextFundingTime', 0)
-                })
-        
-        if not data:
-            logger.error("No perpetual swap funding rates found")
-            return []
-            
-        df = pd.DataFrame(data)
-        logger.info(f"Fetched {len(df)} funding rate records")
-        
-        # Convert funding_rate to absolute float
-        df['funding_rate'] = df['funding_rate'].astype(float).abs()
-        
-        # Sort by absolute funding rate descending
-        df = df.sort_values('funding_rate', ascending=False).head(50)
-        
-        # Extract symbols (CCXT perpetual format is BTC/USDT:USDT, we want BTC/USDT)
-        symbols = []
-        for sym in df['symbol']:
-            base = sym.split(':')[0]  # Remove :USDT suffix
-            symbols.append(base)
-        
-        logger.info(f"Selected top 50 symbols by funding rate: {symbols[:5]}...")
-        return symbols
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch funding rates via CCXT: {e}")
-        return []
 
 def save_symbols(symbols: list[str], path: str = CONFIG_PATH):
     """
