@@ -42,6 +42,9 @@ config = ConfigManager("config/workflow.json").load_config()
 DATA_DIR = config.get("data_dir", "data/klines")
 LOG_DIR = config.get("log_dir", "logs")
 
+# Get timeframe from config to avoid hardcoding
+TIMEFRAME = config.get("data_collection", {}).get("interval", "1m")
+
 # Ensure directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -151,20 +154,23 @@ async def handle_funding_rate(exchange, symbol, funding_rate):
 
     return True
 
-def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> pd.Timestamp | None:
+def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", interval: str = "1m") -> pd.Timestamp | None:
     """
     Read the last timestamp from existing CSV file for a symbol.
 
     Args:
         symbol: Symbol name
         base_dir: Base directory for CSV files
+        interval: Interval string like '1m'
 
     Returns:
         Last timestamp as pd.Timestamp, or None if file doesn't exist or is empty
     """
     symbol_safe = symbol.replace("/", "_")
     dirpath = os.path.join(base_dir, symbol_safe)
-    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+    filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
+
+    logger.debug(f"Symbol {symbol}: Checking file {filepath}, exists={os.path.exists(filepath)}")
 
     if not os.path.exists(filepath):
         return None
@@ -181,33 +187,36 @@ def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> p
             if not last_line:
                 return None
 
-            # Parse CSV line, timestamp is first column after symbol
+            # Parse CSV line, timestamp is first column
             parts = last_line.split(',')
             if len(parts) < 2:
                 return None
 
-            # parts[0] is symbol, parts[1] is timestamp
-            timestamp_str = parts[1].strip()
+            # parts[0] is timestamp, parts[1] is symbol
+            timestamp_str = parts[0].strip()
             return pd.to_datetime(timestamp_str)
 
     except Exception as e:
         logger.warning(f"Failed to read last timestamp from {filepath}: {e}")
         return None
 
-def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> pd.Timestamp | None:
+def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", interval: str = "1m") -> pd.Timestamp | None:
     """
     Read the first timestamp from existing CSV file for a symbol.
 
     Args:
         symbol: Symbol name
         base_dir: Base directory for CSV files
+        interval: Interval string like '1m'
 
     Returns:
         First timestamp as pd.Timestamp, or None if file doesn't exist or is empty
     """
     symbol_safe = symbol.replace("/", "_")
     dirpath = os.path.join(base_dir, symbol_safe)
-    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+    filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
+
+    logger.debug(f"Symbol {symbol}: Checking first timestamp from file {filepath}, exists={os.path.exists(filepath)}")
 
     if not os.path.exists(filepath):
         return None
@@ -224,20 +233,20 @@ def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> 
             if not first_line:
                 return None
 
-            # Parse CSV line, timestamp is first column after symbol
+            # Parse CSV line, timestamp is first column
             parts = first_line.split(',')
             if len(parts) < 2:
                 return None
 
-            # parts[0] is symbol, parts[1] is timestamp
-            timestamp_str = parts[1].strip()
+            # parts[0] is timestamp, parts[1] is symbol
+            timestamp_str = parts[0].strip()
             return pd.to_datetime(timestamp_str)
 
     except Exception as e:
         logger.warning(f"Failed to read first timestamp from {filepath}: {e}")
         return None
 
-def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines") -> tuple[str, str, bool]:
+def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines", interval: str = "1m") -> tuple[str, str, bool]:
     """
     Calculate the optimal fetch window for a symbol based on existing data.
 
@@ -246,22 +255,32 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         requested_start: Requested start time string
         requested_end: Requested end time string
         base_dir: Base directory for CSV files
+        interval: Interval string like '1m'
 
     Returns:
         Tuple of (adjusted_start, adjusted_end, should_fetch)
         should_fetch is False if no new data needed
     """
-    last_timestamp = get_last_timestamp_from_csv(symbol, base_dir)
-    first_timestamp = get_first_timestamp_from_csv(symbol, base_dir)
+    logger.debug(f"calculate_fetch_window called for {symbol} with start={requested_start}, end={requested_end}")
+    print(f"DEBUG: calculate_fetch_window called for {symbol}")  # Temporary debug print
+    last_timestamp = get_last_timestamp_from_csv(symbol, base_dir, interval)
+    first_timestamp = get_first_timestamp_from_csv(symbol, base_dir, interval)
+
+    print(f"DEBUG: {symbol} - last_timestamp={last_timestamp}, first_timestamp={first_timestamp}")  # Debug print
+    logger.debug(f"Symbol {symbol}: last_timestamp={last_timestamp}, first_timestamp={first_timestamp}, requested_start={requested_start}, requested_end={requested_end}")
 
     if last_timestamp is None or first_timestamp is None:
         # No existing data, fetch full range
+        logger.info(f"Symbol {symbol}: No existing data found, fetching full range")
         return requested_start, requested_end, True
 
     # Parse requested times
     try:
         req_start_ts = pd.Timestamp(requested_start).replace(tzinfo=None)
-        req_end_ts = pd.Timestamp(requested_end).replace(tzinfo=None)
+        if requested_end and requested_end.strip():  # Handle empty end_time as current time
+            req_end_ts = pd.Timestamp(requested_end).replace(tzinfo=None)
+        else:
+            req_end_ts = pd.Timestamp.now().replace(tzinfo=None)  # Empty end_time means "up to now"
     except Exception as e:
         logger.error(f"Failed to parse requested times: {e}")
         return requested_start, requested_end, True
@@ -274,9 +293,19 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 15)
     overlap_delta = pd.Timedelta(minutes=overlap_minutes)
 
+    # Get current time for recency check
+    current_time = pd.Timestamp.now().replace(tzinfo=None)
+
     # If existing data already fully covers the requested range, skip fetching
-    if first_timestamp <= req_start_ts and last_timestamp >= req_end_ts:
-        logger.info(f"Symbol {symbol}: Existing data fully covers requested range, skipping fetch")
+    # Also skip if data is recent enough (within overlap_minutes of current time)
+    data_is_recent = (current_time - last_timestamp) <= overlap_delta
+    time_diff_minutes = (current_time - last_timestamp).total_seconds() / 60
+    print(f"DEBUG: {symbol} - current_time={current_time}, time_diff_minutes={time_diff_minutes:.2f}, overlap_delta_minutes={overlap_minutes}, data_is_recent={data_is_recent}")  # Debug print
+    logger.debug(f"Symbol {symbol}: current_time={current_time}, last_timestamp={last_timestamp}, time_diff={time_diff_minutes:.1f} minutes, overlap_delta={overlap_delta}, data_is_recent={data_is_recent}")
+    if (first_timestamp <= req_start_ts and last_timestamp >= req_end_ts) or data_is_recent:
+        print(f"DEBUG: {symbol} - SKIPPING FETCH: data_is_recent={data_is_recent}")  # Debug print
+        logger.info(f"Symbol {symbol}: Existing data fully covers requested range or is recent enough, skipping fetch")
+        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}, data_is_recent={data_is_recent}, current_time={current_time}, last_timestamp={last_timestamp}, time_diff={time_diff_minutes:.1f} minutes, overlap_delta={overlap_delta}")
         return requested_start, requested_end, False
 
     # Determine if we need to fetch earlier data
@@ -291,20 +320,21 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     logger.info(f"Symbol {symbol}: Adjusting fetch window from {requested_start} to {adjusted_start.isoformat()}")
     return adjusted_start.isoformat(), requested_end, True
 
-def load_existing_data(symbol: str, base_dir: str = "data/klines") -> pd.DataFrame | None:
+def load_existing_data(symbol: str, base_dir: str = "data/klines", interval: str = "1m") -> pd.DataFrame | None:
     """
     Load existing data for a symbol from CSV file.
 
     Args:
         symbol: Symbol name
         base_dir: Base directory for CSV files
+        interval: Interval string like '1m'
 
     Returns:
         DataFrame with existing data, or None if file doesn't exist
     """
     symbol_safe = symbol.replace("/", "_")
     dirpath = os.path.join(base_dir, symbol_safe)
-    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+    filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
 
     if not os.path.exists(filepath):
         return None
@@ -319,7 +349,7 @@ def load_existing_data(symbol: str, base_dir: str = "data/klines") -> pd.DataFra
         logger.warning(f"Failed to load existing data from {filepath}: {e}")
         return None
 
-def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 15) -> bool:
+def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 1) -> bool:
     """
     Validate that data has no gaps in the timestamp sequence.
 
@@ -409,13 +439,15 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 	symbol_safe = symbol.replace("/", "_")
 	dirpath = os.path.join(base_dir, symbol_safe)
 	os.makedirs(dirpath, exist_ok=True)
-	filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+	# Get interval from data, default to TIMEFRAME if not found
+	interval = df['interval'].iloc[0] if not df.empty and 'interval' in df.columns else TIMEFRAME
+	filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
 
 	# If append_only mode and file exists, try to append new data
 	if append_only and os.path.exists(filepath):
 		try:
 			# Check if new data timestamps are all after existing data's last timestamp
-			existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir)
+			existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir, interval)
 			if existing_last_ts is not None:
 				new_min_ts = df['timestamp'].min()
 				if new_min_ts > existing_last_ts:
@@ -455,7 +487,7 @@ def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
 
 def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None) -> Dict[str, pd.DataFrame]:
     """
-    Fetch latest 15m candles for specified symbols via REST API within the given time range.
+    Fetch latest 1m candles for specified symbols via REST API within the given time range.
 
     Args:
         symbols: List of symbols, if None uses all from config
@@ -465,6 +497,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
     Returns:
         Dict of symbol -> DataFrame with latest data
     """
+    print(f"DEBUG: update_latest_data called with {len(symbols) if symbols else 0} symbols")  # Debug print
     if symbols is None:
         symbols = load_symbols()
 
@@ -504,12 +537,15 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
     # Check if incremental collection is enabled
     enable_incremental = config.get("data_collection", {}).get("enable_incremental", True)
+    print(f"DEBUG: enable_incremental = {enable_incremental}")  # Debug print
 
     for symbol in symbols:
         try:
             # Calculate fetch window for this symbol if incremental is enabled
             if enable_incremental:
-                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir)
+                print(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
+                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, TIMEFRAME)
+                print(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}")  # Debug print
                 if not should_fetch:
                     logger.info(f"Skipping {symbol} - no new data needed")
                     continue
@@ -552,7 +588,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Use CCXT to fetch OHLCV data
                     ohlcv = exchange.fetch_ohlcv(
                         symbol,
-                        timeframe='15m',
+                        timeframe=TIMEFRAME,
                         since=current_since,
                         limit=min(args.limit, 300)  # OKX max limit is 300
                     )
@@ -595,7 +631,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                 'low': float(candle[3]),
                                 'close': float(candle[4]),
                                 'volume': float(candle[5]),
-                                'interval': '15m'
+                                'interval': TIMEFRAME
                             })
 
                             if ts_ms > latest_ts:
@@ -638,7 +674,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
                 # If incremental, merge with existing data
                 if enable_incremental:
-                    existing_df = load_existing_data(symbol, output_dir)
+                    existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
                     if existing_df is not None and not existing_df.empty:
                         # Ensure both dataframes have datetime timestamps
                         existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], errors='coerce')
@@ -710,6 +746,7 @@ def update_latest_data_with_qlib(symbols=None, output_dir="data/klines"):
 
 async def main(args):
     """Main function to start the data collector."""
+    print("DEBUG: main function called")  # Debug print
     logger.info("Starting OKX data collector")
 
     symbols = load_symbols()
@@ -900,7 +937,7 @@ async def main(args):
     try:
         for symbol in symbols:
             try:
-                await exchange.watch_ohlcv(symbol, '15m', handle_ohlcv)
+                await exchange.watch_ohlcv(symbol, TIMEFRAME, handle_ohlcv)
             except Exception as e:
                 # Convert ccxt NotSupported (or similar) into a clear RuntimeError
                 if type(e).__name__ == "NotSupported" or "watchOHLCV" in str(e) or "watch_ohlcv" in str(e):

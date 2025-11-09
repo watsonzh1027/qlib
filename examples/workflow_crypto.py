@@ -31,6 +31,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from scripts.config_manager import ConfigManager
+from qlib.utils import init_instance_by_config
+from qlib.workflow import R
+from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
+import mlflow
 
 # Setup logging
 logging.basicConfig(
@@ -44,7 +48,7 @@ def verify_data_availability():
     config_manager = ConfigManager()
     data_config = config_manager.config.get('data', {})
 
-    bin_data_dir = data_config.get('bin_data_dir', 'data/qlib_data/crypto')
+    bin_data_dir = data_config.get('bin_data_dir', 'data/qlib_data')
     data_path = project_root / bin_data_dir
 
     if not data_path.exists():
@@ -64,6 +68,30 @@ def initialize_qlib_crypto(data_path):
 
     return qlib
 
+def load_crypto_dataset(qlib, config_manager):
+    """Load and prepare crypto dataset for training."""
+    from qlib.data.dataset import DatasetH
+
+    logger.info("Loading crypto dataset...")
+
+    # Get dataset configuration from config manager
+    dataset_config = config_manager.get_dataset_config()
+
+    dataset = init_instance_by_config(dataset_config)
+    logger.info("Crypto dataset loaded successfully")
+
+    return dataset
+
+def train_crypto_model(dataset, model_config_full):
+    """Train machine learning model on crypto dataset."""
+    logger.info("Training crypto model...")
+
+    model = init_instance_by_config(model_config_full)
+    model.fit(dataset)
+    logger.info("Crypto model trained successfully")
+
+    return model
+
 def main():
     """Main workflow execution function."""
     logger.info("Starting Crypto Trading Workflow")
@@ -73,11 +101,19 @@ def main():
         config_manager = ConfigManager()
         workflow_config = config_manager.get_workflow_config()
         model_config = config_manager.get_model_config()
+        model_config_full = config_manager.get_model_config_full()
+        data_handler_config = config_manager.get_data_handler_config()
         trading_config = config_manager.get_trading_config()
+        backtest_config = config_manager.get_backtest_config()
+        port_analysis_config = config_manager.get_port_analysis_config()
 
         logger.info(f"Workflow config: {workflow_config}")
         logger.info(f"Model config: {model_config}")
+        logger.info(f"Model config full: {model_config_full}")
+        logger.info(f"Data handler config: {data_handler_config}")
         logger.info(f"Trading config: {trading_config}")
+        logger.info(f"Backtest config: {backtest_config}")
+        logger.info(f"Port analysis config: {port_analysis_config}")
 
         # Verify data availability
         data_path = verify_data_availability()
@@ -85,12 +121,37 @@ def main():
         # Initialize qlib
         qlib = initialize_qlib_crypto(data_path)
 
-        # TODO: Implement remaining workflow steps
-        # 1. Load and prepare dataset
-        # 2. Train model
-        # 3. Generate signals
-        # 4. Run backtesting
-        # 5. Generate analysis
+        # Load and prepare dataset
+        dataset = load_crypto_dataset(qlib, config_manager)
+
+        # Train model
+        model = train_crypto_model(dataset, model_config_full)
+
+        # End the MLflow run started by model.fit()
+        mlflow.end_run()
+
+        # Generate signals and run backtesting
+        logger.info("Generating signals and running backtesting...")
+
+        # Add signal to strategy kwargs
+        port_analysis_config["strategy"]["kwargs"]["signal"] = (model, dataset)
+
+        with R.start(experiment_name="crypto_workflow"):
+            # Signal generation
+            recorder = R.get_recorder()
+            sr = SignalRecord(model, dataset, recorder)
+            sr.generate()
+            logger.info("Signals generated successfully")
+
+            # Signal Analysis
+            sar = SigAnaRecord(recorder)
+            sar.generate()
+            logger.info("Signal analysis completed")
+
+            # Portfolio Analysis / Backtesting
+            par = PortAnaRecord(recorder, port_analysis_config, "15min")
+            par.generate()
+            logger.info("Backtesting completed")
 
         logger.info("Crypto Trading Workflow completed successfully")
 
