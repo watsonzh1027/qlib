@@ -95,9 +95,9 @@ class PortfolioMetrics:
 
     @staticmethod
     def _cal_benchmark(benchmark_config: Optional[dict], freq: str) -> Optional[pd.Series]:
-        if benchmark_config is None:
+        if benchmark_config is None or benchmark_config.get("benchmark") is None:
             return None
-        benchmark = benchmark_config.get("benchmark", CSI300_BENCH)
+        benchmark = benchmark_config.get("benchmark")
         if benchmark is None:
             return None
 
