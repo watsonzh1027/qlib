@@ -12,6 +12,12 @@ get_repo_root() {
     fi
 }
 
+# Get repository root without Git dependency
+get_repo_root_no_git() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    (cd "$script_dir/../../.." && pwd)
+}
+
 # Get current branch, with fallback for non-git repositories
 get_current_branch() {
     # First check if SPECIFY_FEATURE environment variable is set

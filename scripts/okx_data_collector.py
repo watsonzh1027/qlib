@@ -355,6 +355,27 @@ def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 15) -> bo
         logger.error(f"Error validating data continuity: {e}")
         return False
 
+def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize kline data by sorting timestamps, removing duplicates, and ensuring proper datetime format.
+
+    Args:
+        df: DataFrame with kline data containing 'timestamp' column
+
+    Returns:
+        Normalized DataFrame with sorted, deduplicated data
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df.set_index('timestamp', inplace=True)
+    df.index = pd.to_datetime(df.index)
+    df = df[~df.index.duplicated(keep="first")]
+    df.sort_index(inplace=True)
+    df.index.names = ['timestamp']
+    return df.reset_index()
+
 def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False) -> bool:
 	"""
 	Save buffered klines for a symbol to a Parquet file.
@@ -381,6 +402,10 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 	# Convert timestamp to readable datetime string if not already datetime
 	if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
 		df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+	
+	# Normalize the data
+	df = normalize_klines(df)
+	
 	symbol_safe = symbol.replace("/", "_")
 	dirpath = os.path.join(base_dir, symbol_safe)
 	os.makedirs(dirpath, exist_ok=True)

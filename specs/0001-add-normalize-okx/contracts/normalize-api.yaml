@@ -1,0 +1,107 @@
+openapi: 3.0.0
+info:
+  title: OKX Data Collector Normalization API
+  version: 1.0.0
+  description: API contract for the normalize_klines function
+
+paths:
+  /normalize:
+    post:
+      summary: Normalize kline data
+      description: Normalizes cryptocurrency kline data by sorting timestamps and removing duplicates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      symbol:
+                        type: string
+                        example: "BTC/USDT"
+                      timestamp:
+                        type: number
+                        format: int64
+                        example: 1640995200
+                      open:
+                        type: number
+                        format: float
+                        example: 50000.0
+                      high:
+                        type: number
+                        format: float
+                        example: 51000.0
+                      low:
+                        type: number
+                        format: float
+                        example: 49000.0
+                      close:
+                        type: number
+                        format: float
+                        example: 50500.0
+                      volume:
+                        type: number
+                        format: float
+                        example: 100.5
+                      interval:
+                        type: string
+                        example: "15m"
+                    required:
+                      - symbol
+                      - timestamp
+                      - open
+                      - high
+                      - low
+                      - close
+                      - volume
+                      - interval
+      responses:
+        '200':
+          description: Normalized data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        symbol:
+                          type: string
+                        timestamp:
+                          type: string
+                          format: date-time
+                        open:
+                          type: number
+                          format: float
+                        high:
+                          type: number
+                          format: float
+                        low:
+                          type: number
+                          format: float
+                        close:
+                          type: number
+                          format: float
+                        volume:
+                          type: number
+                          format: float
+                        interval:
+                          type: string
+        '400':
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Invalid timestamp format"

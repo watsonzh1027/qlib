@@ -80,28 +80,19 @@ find_repo_root() {
     return 1
 }
 
-# Function to check existing branches (local and remote) and return next available number
-check_existing_branches() {
+# Function to check existing feature directories and return next available number
+check_existing_features() {
     local short_name="$1"
     
-    # Fetch all remotes to get latest branch info (suppress errors if no remotes)
-    git fetch --all --prune 2>/dev/null || true
-    
-    # Find all branches matching the pattern using git ls-remote (more reliable)
-    local remote_branches=$(git ls-remote --heads origin 2>/dev/null | grep -E "refs/heads/[0-9]+-${short_name}$" | sed 's/.*\/\([0-9]*\)-.*/\1/' | sort -n)
-    
-    # Also check local branches
-    local local_branches=$(git branch 2>/dev/null | grep -E "^[* ]*[0-9]+-${short_name}$" | sed 's/^[* ]*//' | sed 's/-.*//' | sort -n)
-    
-    # Check specs directory as well
+    # Check specs directory for existing features with this short name
     local spec_dirs=""
     if [ -d "$SPECS_DIR" ]; then
         spec_dirs=$(find "$SPECS_DIR" -maxdepth 1 -type d -name "[0-9]*-${short_name}" 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/-.*//' | sort -n)
     fi
     
-    # Combine all sources and get the highest number
+    # Get the highest number
     local max_num=0
-    for num in $remote_branches $local_branches $spec_dirs; do
+    for num in $spec_dirs; do
         if [ "$num" -gt "$max_num" ]; then
             max_num=$num
         fi
@@ -111,21 +102,13 @@ check_existing_branches() {
     echo $((max_num + 1))
 }
 
-# Resolve repository root. Prefer git information when available, but fall back
-# to searching for repository markers so the workflow still functions in repositories that
-# were initialised with --no-git.
+# Resolve repository root by searching for repository markers
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    REPO_ROOT=$(git rev-parse --show-toplevel)
-    HAS_GIT=true
-else
-    REPO_ROOT="$(find_repo_root "$SCRIPT_DIR")"
-    if [ -z "$REPO_ROOT" ]; then
-        echo "Error: Could not determine repository root. Please run this script from within the repository." >&2
-        exit 1
-    fi
-    HAS_GIT=false
+REPO_ROOT="$(find_repo_root "$SCRIPT_DIR")"
+if [ -z "$REPO_ROOT" ]; then
+    echo "Error: Could not determine repository root. Please run this script from within the repository." >&2
+    exit 1
 fi
 
 cd "$REPO_ROOT"
@@ -191,23 +174,8 @@ fi
 
 # Determine branch number
 if [ -z "$BRANCH_NUMBER" ]; then
-    if [ "$HAS_GIT" = true ]; then
-        # Check existing branches on remotes
-        BRANCH_NUMBER=$(check_existing_branches "$BRANCH_SUFFIX")
-    else
-        # Fall back to local directory check
-        HIGHEST=0
-        if [ -d "$SPECS_DIR" ]; then
-            for dir in "$SPECS_DIR"/*; do
-                [ -d "$dir" ] || continue
-                dirname=$(basename "$dir")
-                number=$(echo "$dirname" | grep -o '^[0-9]\+' || echo "0")
-                number=$((10#$number))
-                if [ "$number" -gt "$HIGHEST" ]; then HIGHEST=$number; fi
-            done
-        fi
-        BRANCH_NUMBER=$((HIGHEST + 1))
-    fi
+    # Check existing feature directories
+    BRANCH_NUMBER=$(check_existing_features "$BRANCH_SUFFIX")
 fi
 
 FEATURE_NUM=$(printf "%03d" "$BRANCH_NUMBER")
@@ -232,12 +200,6 @@ if [ ${#BRANCH_NAME} -gt $MAX_BRANCH_LENGTH ]; then
     >&2 echo "[specify] Warning: Branch name exceeded GitHub's 244-byte limit"
     >&2 echo "[specify] Original: $ORIGINAL_BRANCH_NAME (${#ORIGINAL_BRANCH_NAME} bytes)"
     >&2 echo "[specify] Truncated to: $BRANCH_NAME (${#BRANCH_NAME} bytes)"
-fi
-
-if [ "$HAS_GIT" = true ]; then
-    git checkout -b "$BRANCH_NAME"
-else
-    >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
 fi
 
 FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"

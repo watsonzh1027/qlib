@@ -26,6 +26,7 @@ JSON_MODE=false
 REQUIRE_TASKS=false
 INCLUDE_TASKS=false
 PATHS_ONLY=false
+FEATURE_NAME=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -41,6 +42,9 @@ for arg in "$@"; do
         --paths-only)
             PATHS_ONLY=true
             ;;
+        --feature=*)
+            FEATURE_NAME="${arg#*=}"
+            ;;
         --help|-h)
             cat << 'EOF'
 Usage: check-prerequisites.sh [OPTIONS]
@@ -48,6 +52,7 @@ Usage: check-prerequisites.sh [OPTIONS]
 Consolidated prerequisite checking for Spec-Driven Development workflow.
 
 OPTIONS:
+  --feature=NAME      Feature name (e.g., 001-add-feature) - required unless --paths-only
   --json              Output in JSON format
   --require-tasks     Require tasks.md to exist (for implementation phase)
   --include-tasks     Include tasks.md in AVAILABLE_DOCS list
@@ -56,13 +61,13 @@ OPTIONS:
 
 EXAMPLES:
   # Check task prerequisites (plan.md required)
-  ./check-prerequisites.sh --json
+  ./check-prerequisites.sh --feature=001-add-feature --json
   
   # Check implementation prerequisites (plan.md + tasks.md required)
-  ./check-prerequisites.sh --json --require-tasks --include-tasks
+  ./check-prerequisites.sh --feature=001-add-feature --json --require-tasks --include-tasks
   
   # Get feature paths only (no validation)
-  ./check-prerequisites.sh --paths-only
+  ./check-prerequisites.sh --feature=001-add-feature --paths-only
   
 EOF
             exit 0
@@ -74,23 +79,39 @@ EOF
     esac
 done
 
+# Validate required parameters
+if [[ -z "$FEATURE_NAME" && "$PATHS_ONLY" != true ]]; then
+    echo "ERROR: --feature=NAME is required unless --paths-only is specified" >&2
+    echo "Use --help for usage information." >&2
+    exit 1
+fi
+
 # Source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-# Get feature paths and validate branch
-eval $(get_feature_paths)
-check_feature_branch "$CURRENT_BRANCH" "$HAS_GIT" || exit 1
+# Get repository root (no Git dependency)
+REPO_ROOT=$(get_repo_root_no_git)
+FEATURE_DIR="$REPO_ROOT/specs/$FEATURE_NAME"
+
+# Set up paths
+FEATURE_SPEC="$FEATURE_DIR/spec.md"
+IMPL_PLAN="$FEATURE_DIR/plan.md"
+TASKS="$FEATURE_DIR/tasks.md"
+RESEARCH="$FEATURE_DIR/research.md"
+DATA_MODEL="$FEATURE_DIR/data-model.md"
+QUICKSTART="$FEATURE_DIR/quickstart.md"
+CONTRACTS_DIR="$FEATURE_DIR/contracts"
 
 # If paths-only mode, output paths and exit (support JSON + paths-only combined)
 if $PATHS_ONLY; then
     if $JSON_MODE; then
         # Minimal JSON paths payload (no validation performed)
-        printf '{"REPO_ROOT":"%s","BRANCH":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
-            "$REPO_ROOT" "$CURRENT_BRANCH" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN" "$TASKS"
+        printf '{"REPO_ROOT":"%s","FEATURE":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
+            "$REPO_ROOT" "$FEATURE_NAME" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN" "$TASKS"
     else
         echo "REPO_ROOT: $REPO_ROOT"
-        echo "BRANCH: $CURRENT_BRANCH"
+        echo "FEATURE: $FEATURE_NAME"
         echo "FEATURE_DIR: $FEATURE_DIR"
         echo "FEATURE_SPEC: $FEATURE_SPEC"
         echo "IMPL_PLAN: $IMPL_PLAN"
