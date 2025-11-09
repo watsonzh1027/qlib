@@ -2,15 +2,17 @@
     "data":
     {
         "csv_data_dir": "data/klines",
-        "bin_data_dir": "data/qlib_data",
+        "bin_data_dir": "data/qlib_data/crypto",
         "symbols": "config/top50_symbols.json"
     },
   "data_collection": {
     "interval": "15m",
     "api_timeout": 10,
-    "start_time": "2024-11-04",
-    "end_time": "2025-11-04",
-    "limit": 1000
+    "start_time": "2025-11-01",
+    "end_time": "",
+    "limit": 1000,
+    "overlap_minutes": 15,
+    "enable_incremental": true
   },
   "data_convertor": {
     "date_field_name": "timestamp",
@@ -21,5 +23,23 @@
     "start_time": "2025-01-01",
     "end_time": "2025-01-31",
     "initial_capital": 1000000
+  },
+  "workflow": {
+    "start_time": "2021-01-01",
+    "end_time": "2024-01-01",
+    "frequency": "15min",
+    "instruments_limit": 50
+  },
+  "model": {
+    "type": "GBDT",
+    "learning_rate": 0.1,
+    "num_boost_round": 100
+  },
+  "trading": {
+    "open_cost": 0.001,
+    "close_cost": 0.001,
+    "min_cost": 0.001,
+    "strategy_topk": 50,
+    "strategy_n_drop": 5
   }
 }

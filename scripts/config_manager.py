@@ -26,6 +26,48 @@ class ConfigManager:
             return 1000
         return value
 
+    def get_workflow_config(self):
+        """
+        Get workflow-specific configuration parameters.
+
+        Returns:
+            dict: Workflow configuration with defaults
+        """
+        return {
+            "start_time": self.get_with_defaults("workflow", "start_time", "2021-01-01"),
+            "end_time": self.get_with_defaults("workflow", "end_time", "2024-01-01"),
+            "frequency": self.get("workflow", "frequency", "15min"),
+            "instruments_limit": self.get("workflow", "instruments_limit", 50)
+        }
+
+    def get_model_config(self):
+        """
+        Get model configuration parameters.
+
+        Returns:
+            dict: Model configuration
+        """
+        return {
+            "type": self.get("model", "type", "GBDT"),
+            "learning_rate": self.get("model", "learning_rate", 0.1),
+            "num_boost_round": self.get("model", "num_boost_round", 100)
+        }
+
+    def get_trading_config(self):
+        """
+        Get trading/backtesting configuration parameters.
+
+        Returns:
+            dict: Trading configuration
+        """
+        return {
+            "open_cost": self.get("trading", "open_cost", 0.001),
+            "close_cost": self.get("trading", "close_cost", 0.001),
+            "min_cost": self.get("trading", "min_cost", 0.001),
+            "strategy_topk": self.get("trading", "strategy_topk", 50),
+            "strategy_n_drop": self.get("trading", "strategy_n_drop", 5)
+        }
+
     def load_config(self):
         """
         Public method to reload and return the configuration.
