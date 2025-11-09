@@ -17,7 +17,6 @@ data/
 .env
 .vim
 .nvimrc
-.vscode
 *.bin
 *.log
 *.parquet
@@ -44,8 +43,7 @@ mlruns/
 tags
 
 .pytest_cache/
-.mypy_cache/
-.vscode/
+.mypy_cache/ 
 
 *.swp
 
