@@ -203,13 +203,20 @@ _default_config = {
                 "level": logging.DEBUG,
                 "formatter": "logger_format",
                 "filters": ["field_not_found"],
+            },
+            "file": {
+                "class": "logging.FileHandler",
+                "filename": "logs/qlib.log",
+                "level": logging.DEBUG,
+                "formatter": "logger_format",
+                "filters": ["field_not_found"],
             }
         },
         # Normally this should be set to `False` to avoid duplicated logging [1].
         # However, due to bug in pytest, it requires log message to propagate to root logger to be captured by `caplog` [2].
         # [1] https://github.com/microsoft/qlib/pull/1661
         # [2] https://github.com/pytest-dev/pytest/issues/3697
-        "loggers": {"qlib": {"level": logging.DEBUG, "handlers": ["console"], "propagate": False}},
+        "loggers": {"qlib": {"level": logging.DEBUG, "handlers": ["console", "file"], "propagate": False}},
         # To let qlib work with other packages, we shouldn't disable existing loggers.
         # Note that this param is default to True according to the documentation of logging.
         "disable_existing_loggers": False,
