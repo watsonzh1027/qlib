@@ -135,12 +135,13 @@ config = config_manager.config
 input_dir = config.get("data", {}).get("csv_data_dir", "data/klines")
 output_dir = os.path.abspath(config.get("data", {}).get("bin_data_dir", "data/qlib_data/crypto"))
 
-def validate_data_integrity(df):
+def validate_data_integrity(df, freq):
     """
     Validate data integrity by checking for gaps and ensuring correct timestamps.
 
     Args:
         df (pd.DataFrame): DataFrame containing OHLCV data.
+        freq (str): Frequency string for pd.date_range (e.g., "15T" for 15 minutes).
 
     Returns:
         bool: True if data is valid, False otherwise.
@@ -154,7 +155,7 @@ def validate_data_integrity(df):
     expected_intervals = pd.date_range(
         start=df_copy["timestamp"].min(),
         end=df_copy["timestamp"].max(),
-        freq="15T"
+        freq=freq
     )
     actual_intervals = df_copy["timestamp"]
     return set(expected_intervals).issubset(set(actual_intervals))
@@ -164,11 +165,32 @@ def convert_to_qlib():
     """
     Convert OHLCV data from CSV format to Qlib-compatible binary format.
     """
-    input_dir = config.get("data", {}).get("csv_data_dir", "data/klines")
-    output_dir = os.path.abspath(config.get("data", {}).get("bin_data_dir", "data/qlib_data"))
+    # Get configuration parameters
+    data_config = config.get("data", {})
+    data_convertor = config.get("data_convertor", {})
+    data_collection = config.get("data_collection", {})
+    
+    input_dir = data_config.get("csv_data_dir", "data/klines")
+    output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data"))
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Get interval from data_collection and convert to qlib freq
+    interval = data_collection.get("interval", "1m")
+    freq = config_manager._convert_ccxt_freq_to_qlib(interval)
+    
+    # Get convertor parameters
+    date_field_name = data_convertor.get("date_field_name", "timestamp")
+    include_fields = data_convertor.get("include_fields", ["open", "high", "low", "close", "volume"])
+    symbol_field_name = "symbol"  # Assuming default, can be added to config if needed
+    
+    # Determine exclude fields: all columns except include_fields + symbol + date
+    exclude_fields_list = [date_field_name, symbol_field_name]
+    if 'interval' in pd.read_csv(os.path.join(input_dir, os.listdir(input_dir)[0], os.listdir(os.path.join(input_dir, os.listdir(input_dir)[0]))[0])).columns:
+        exclude_fields_list.append('interval')
+    exclude_fields = ','.join(exclude_fields_list)
+    
     all_data = {}  # Dictionary to hold all symbol data in memory
-    freq = None
+    
     for symbol_dir in os.listdir(input_dir):
         symbol_path = os.path.join(input_dir, symbol_dir)
         if os.path.isdir(symbol_path):
@@ -179,14 +201,10 @@ def convert_to_qlib():
                     symbol_data.append(df)
             if symbol_data:
                 # Merge and deduplicate data for this symbol
-                merged_df = pd.concat(symbol_data).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                merged_df = pd.concat(symbol_data).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
                 # Convert timestamp to datetime string for Qlib compatibility
-                merged_df['timestamp'] = pd.to_datetime(merged_df['timestamp'])
-                if validate_data_integrity(merged_df):
-                    # Extract freq from interval column (assume consistent across symbols)
-                    if freq is None and 'interval' in merged_df.columns:
-                        ccxt_freq = str(merged_df['interval'].iloc[0])
-                        freq = config_manager._convert_ccxt_freq_to_qlib(ccxt_freq)
+                merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
+                if validate_data_integrity(merged_df, freq):
                     all_data[symbol_dir] = merged_df  # Store in memory
                 else:
                     print(f"Data integrity validation failed for {symbol_dir}")
@@ -195,9 +213,6 @@ def convert_to_qlib():
     if not all_data:
         print("No valid data found.")
         return
-
-    if freq is None:
-        freq = "high"  # Default if no interval found
 
     # Create temporary directory for CSV files
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -209,9 +224,10 @@ def convert_to_qlib():
             data_path=temp_dir,
             qlib_dir=output_dir,
             freq=freq,
-            date_field_name="timestamp",
-            symbol_field_name="symbol",
-            exclude_fields="interval,symbol",
+            date_field_name=date_field_name,
+            symbol_field_name=symbol_field_name,
+            exclude_fields=exclude_fields,
+            include_fields=','.join(include_fields),
             max_workers=4
         )
         dumper.dump()
