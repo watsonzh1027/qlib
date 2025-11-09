@@ -194,6 +194,49 @@ def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> p
         logger.warning(f"Failed to read last timestamp from {filepath}: {e}")
         return None
 
+def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines") -> pd.Timestamp | None:
+    """
+    Read the first timestamp from existing CSV file for a symbol.
+
+    Args:
+        symbol: Symbol name
+        base_dir: Base directory for CSV files
+
+    Returns:
+        First timestamp as pd.Timestamp, or None if file doesn't exist or is empty
+    """
+    symbol_safe = symbol.replace("/", "_")
+    dirpath = os.path.join(base_dir, symbol_safe)
+    filepath = os.path.join(dirpath, f"{symbol_safe}.csv")
+
+    if not os.path.exists(filepath):
+        return None
+
+    try:
+        # Read only the first few lines to get the earliest timestamp
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+            if len(lines) <= 1:  # Only header or empty
+                return None
+
+            # Get the first data line
+            first_line = lines[1].strip()  # Skip header
+            if not first_line:
+                return None
+
+            # Parse CSV line, timestamp is first column after symbol
+            parts = first_line.split(',')
+            if len(parts) < 2:
+                return None
+
+            # parts[0] is symbol, parts[1] is timestamp
+            timestamp_str = parts[1].strip()
+            return pd.to_datetime(timestamp_str)
+
+    except Exception as e:
+        logger.warning(f"Failed to read first timestamp from {filepath}: {e}")
+        return None
+
 def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines") -> tuple[str, str, bool]:
     """
     Calculate the optimal fetch window for a symbol based on existing data.
@@ -209,8 +252,9 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         should_fetch is False if no new data needed
     """
     last_timestamp = get_last_timestamp_from_csv(symbol, base_dir)
+    first_timestamp = get_first_timestamp_from_csv(symbol, base_dir)
 
-    if last_timestamp is None:
+    if last_timestamp is None or first_timestamp is None:
         # No existing data, fetch full range
         return requested_start, requested_end, True
 
@@ -222,21 +266,27 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         logger.error(f"Failed to parse requested times: {e}")
         return requested_start, requested_end, True
 
-    # Ensure last_timestamp is also tz-naive for comparison
-    if last_timestamp is not None:
-        last_timestamp = last_timestamp.replace(tzinfo=None)
+    # Ensure timestamps are tz-naive for comparison
+    first_timestamp = first_timestamp.replace(tzinfo=None)
+    last_timestamp = last_timestamp.replace(tzinfo=None)
 
     # Get overlap configuration
     overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 15)
     overlap_delta = pd.Timedelta(minutes=overlap_minutes)
 
-    # If existing data already covers the requested range, skip fetching
-    if last_timestamp >= req_end_ts:
-        logger.info(f"Symbol {symbol}: Existing data covers requested range, skipping fetch")
+    # If existing data already fully covers the requested range, skip fetching
+    if first_timestamp <= req_start_ts and last_timestamp >= req_end_ts:
+        logger.info(f"Symbol {symbol}: Existing data fully covers requested range, skipping fetch")
         return requested_start, requested_end, False
 
-    # Adjust start time to last_timestamp - overlap to ensure continuity
-    adjusted_start = max(req_start_ts, last_timestamp - overlap_delta)
+    # Determine if we need to fetch earlier data
+    need_earlier = req_start_ts < first_timestamp
+
+    # Adjust start time: if we need earlier data, start from requested start; otherwise, start from last_timestamp - overlap
+    if need_earlier:
+        adjusted_start = req_start_ts
+    else:
+        adjusted_start = max(req_start_ts, last_timestamp - overlap_delta)
 
     logger.info(f"Symbol {symbol}: Adjusting fetch window from {requested_start} to {adjusted_start.isoformat()}")
     return adjusted_start.isoformat(), requested_end, True
