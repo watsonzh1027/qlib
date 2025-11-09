@@ -115,7 +115,7 @@ class DumpDataBase:
         self._include_fields = tuple(filter(lambda x: len(x) > 0, map(str.strip, include_fields)))
         self.file_suffix = file_suffix
         self.symbol_field_name = symbol_field_name
-        self.df_files = sorted(data_path.glob(f"*{self.file_suffix}") if data_path.is_dir() else [data_path])
+        self.df_files = sorted(data_path.rglob(f"*{self.file_suffix}") if data_path.is_dir() else [data_path])
         if limit_nums is not None:
             self.df_files = self.df_files[: int(limit_nums)]
         self.qlib_dir = Path(qlib_dir).expanduser()

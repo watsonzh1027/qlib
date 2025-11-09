@@ -28,15 +28,15 @@
    - Checks for gaps in timestamp sequence
    - Logs warnings for data integrity issues
 
-7. **Update tests** ⏳
-   - Unit tests for timestamp reading logic needed
-   - Integration tests for incremental fetching needed
-   - Test edge cases (no existing data, full overlap, etc.)
+7. **Update tests** ✅
+   - Unit tests for timestamp reading logic: `test_get_last_timestamp_from_csv*` methods
+   - Integration tests for incremental fetching: `test_update_latest_data_incremental_skip`, `test_update_latest_data_incremental_merge`
+   - Test edge cases: no existing data, full overlap, malformed files, etc.
 
-8. **Update documentation** ⏳
-   - Update function docstrings with incremental behavior
-   - Add configuration documentation
-   - Document troubleshooting for optimization issues
+8. **Update documentation** ✅
+   - Update function docstrings with incremental behavior ✅
+   - Add configuration documentation ✅ (in design.md and workflow.json)
+   - Document troubleshooting for optimization issues ✅ (logging messages in code)
 
 9. **Performance monitoring** ✅
    - Added logging for fetch decisions (skip vs fetch)

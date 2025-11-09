@@ -34,7 +34,7 @@ def validate_data_integrity(df):
         return False
     # Convert timestamp to datetime
     df_copy = df.copy()
-    df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'], unit='s')
+    df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'])
     # Check for missing timestamps
     expected_intervals = pd.date_range(
         start=df_copy["timestamp"].min(),
@@ -66,7 +66,7 @@ def convert_to_qlib():
                 # Merge and deduplicate data for this symbol
                 merged_df = pd.concat(symbol_data).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
                 # Convert timestamp to datetime string for Qlib compatibility
-                merged_df['timestamp'] = pd.to_datetime(merged_df['timestamp'], unit='s')
+                merged_df['timestamp'] = pd.to_datetime(merged_df['timestamp'])
                 if validate_data_integrity(merged_df):
                     # Extract freq from interval column (assume consistent across symbols)
                     if freq is None and 'interval' in merged_df.columns:
