@@ -63,7 +63,8 @@ def initialize_qlib_crypto(data_path):
     from qlib.constant import REG_CN  # Using CN region for now, may need crypto-specific
 
     logger.info(f"Initializing qlib with data path: {data_path}")
-    qlib.init(provider_uri=data_path, region=REG_CN)
+    # Use sequential backend and single kernel to avoid parallel processing issues in tests
+    qlib.init(provider_uri=data_path, region=REG_CN, joblib_backend="sequential", kernels=1)
     logger.info("Qlib initialized successfully for crypto data")
 
     return qlib

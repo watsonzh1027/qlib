@@ -62,7 +62,7 @@ class CheckBin:
             redis_port=-1,
         )
         csv_path = Path(csv_path).expanduser()
-        self.csv_files = sorted(csv_path.glob(f"*{file_suffix}") if csv_path.is_dir() else [csv_path])
+        self.csv_files = sorted(csv_path.rglob(f"*{file_suffix}") if csv_path.is_dir() else [csv_path])
 
         if check_fields is None:
             check_fields = list(map(lambda x: x.name.split(".")[0], bin_path_list[0].glob(f"*.bin")))

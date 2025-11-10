@@ -56,17 +56,17 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T010 [P] [US1] Unit test for data loading in tests/test_workflow_crypto.py
-- [ ] T011 [P] [US1] Unit test for model training in tests/test_workflow_crypto.py
-- [ ] T012 [P] [US1] Unit test for signal generation in tests/test_workflow_crypto.py
-- [ ] T013 [P] [US1] Integration test for complete workflow in tests/test_workflow_crypto.py
+- [X] T010 [P] [US1] Unit test for data loading in tests/test_workflow_crypto.py
+- [X] T011 [P] [US1] Unit test for model training in tests/test_workflow_crypto.py
+- [X] T012 [P] [US1] Unit test for signal generation in tests/test_workflow_crypto.py
+- [X] T013 [P] [US1] Integration test for complete workflow in tests/test_workflow_crypto.py
 
 ### Implementation for User Story 1
 
-- [X] T014 [US1] Implement data loading from qlib crypto provider in examples/workflow_crypto.py
-- [X] T015 [US1] Implement model training with GBDT on crypto data in examples/workflow_crypto.py
-- [X] T016 [US1] Implement signal generation using trained model in examples/workflow_crypto.py
-- [X] T017 [US1] Implement backtesting with crypto-specific parameters in examples/workflow_crypto.py
+- [ ] T014 [US1] Implement data loading from qlib crypto provider in examples/workflow_crypto.py
+- [ ] T015 [US1] Implement model training with GBDT on crypto data in examples/workflow_crypto.py
+- [ ] T016 [US1] Implement signal generation using trained model in examples/workflow_crypto.py
+- [ ] T017 [US1] Implement backtesting with crypto-specific parameters in examples/workflow_crypto.py
 - [X] T018 [US1] Add experiment logging and recorder setup in examples/workflow_crypto.py
 - [X] T019 [US1] Add error handling and validation in examples/workflow_crypto.py
 

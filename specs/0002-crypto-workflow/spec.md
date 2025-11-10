@@ -48,15 +48,15 @@ As a researcher, I want to analyze the trained model's performance on crypto dat
 
 **Acceptance Scenarios**:
 
-1. **Given** a trained model on crypto data, **When** I run signal analysis, **Then** the system generates analysis reports with relevant crypto market insights.
-2. **Given** backtest results, **When** I review portfolio metrics, **Then** the system provides performance statistics appropriate for crypto trading strategies.
+1. **Given** a trained model on crypto data, **When** I run signal analysis, **Then** the system generates analysis reports with signal correlation >0.3 and IC (Information Coefficient) >0.2 for crypto instruments.
+2. **Given** backtest results, **When** I review portfolio metrics, **Then** the system provides Sharpe ratio >1.0, max drawdown <30%, and annualized returns >10% for crypto-appropriate strategies.
 
 ### Edge Cases
 
-- What happens when crypto data is incomplete or has gaps?
-- How does the system handle high volatility typical in crypto markets?
-- What if the model fails to converge on crypto data?
-- How are crypto-specific trading costs and constraints handled?
+- **Data Gaps**: Interpolate gaps <4 hours, skip instruments with >20% missing data in backtest period (2021-2024).
+- **High Volatility**: Use position sizing limits (max 5% per instrument) and stop-loss at 10% drawdown per trade.
+- **Model Convergence**: Fallback to simpler model if GBDT fails to converge after 100 iterations with <95% accuracy.
+- **Trading Costs**: Apply 0.1% maker/taker fees, 24/7 trading hours, no overnight gaps in backtesting.
 
 ## Requirements *(mandatory)*
 
@@ -69,8 +69,8 @@ As a researcher, I want to analyze the trained model's performance on crypto dat
 - **FR-005**: System MUST perform signal analysis on crypto-generated signals
 - **FR-006**: System MUST execute backtesting with crypto-specific trading parameters (0.1% maker/taker fees, 24/7 trading)
 - **FR-007**: System MUST generate portfolio analysis reports with crypto-appropriate metrics
-- **FR-008**: System MUST support crypto instrument universe configuration using top 50 symbols from config/top50_symbols.json
-- **FR-009**: System MUST handle crypto data time frequencies (15 minutes) appropriately
+- **FR-008**: System MUST support crypto instrument universe configuration using top 50 symbols from config/top50_symbols.json (JSON array of symbol strings, e.g., ["BTC/USDT", "ETH/USDT"])
+- **FR-009**: System MUST handle crypto data time frequencies (15 minutes) by resampling daily data to 15-min intervals and validating timestamp continuity
 - **FR-010**: System MUST log workflow parameters and save trained models for reproducibility
 
 ### Key Entities *(include if feature involves data)*
