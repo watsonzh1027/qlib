@@ -110,6 +110,68 @@ def train_crypto_model(dataset, model_config_full):
 
     return model
 
+def perform_data_health_checks(recorder, sig_ana_record):
+    """Perform health checks on signal analysis results to detect issues early."""
+    logger.info("Performing data health checks...")
+
+    try:
+        # Check signal record for NaN values and basic statistics
+        signal_df = recorder.load_object("pred.pkl")
+        if signal_df is not None:
+            nan_count = signal_df.isna().sum().sum()
+            if nan_count > 0:
+                logger.warning(f"Signal predictions contain {nan_count} NaN values")
+            else:
+                logger.info("Signal predictions are clean (no NaN values)")
+
+            # Check signal statistics
+            signal_mean = signal_df.mean().mean()
+            signal_std = signal_df.std().mean()
+            logger.info(f"Signal statistics - Mean: {signal_mean:.4f}, Std: {signal_std:.4f}")
+
+            # Check for unrealistic signal values
+            if signal_std < 1e-6:
+                logger.warning("Signal standard deviation is very low, model may not be learning")
+        else:
+            logger.warning("Could not load signal predictions from recorder")
+
+        # Try to get any saved analysis results
+        try:
+            # List all available artifacts
+            artifacts = recorder.list_artifacts()
+            logger.info(f"Available artifacts: {artifacts}")
+
+            # Look for analysis artifacts
+            for artifact in artifacts:
+                if 'analysis' in artifact.lower() or 'ic' in artifact.lower():
+                    logger.info(f"Found analysis artifact: {artifact}")
+                    try:
+                        analysis_data = recorder.load_object(artifact)
+                        logger.info(f"Analysis data type: {type(analysis_data)}")
+                        if isinstance(analysis_data, dict):
+                            logger.info(f"Analysis data keys: {list(analysis_data.keys())}")
+                            # Try to extract IC values from dict
+                            ic_val = analysis_data.get('IC')
+                            if ic_val is not None:
+                                logger.info(f"IC value from {artifact}: {ic_val}")
+                                if abs(ic_val) > 0.95:
+                                    logger.warning(f"IC ({ic_val}) is unrealistically high, possible data leakage")
+                                elif abs(ic_val) < 0.01:
+                                    logger.warning(f"IC ({ic_val}) is very low, model may have no predictive power")
+                        elif hasattr(analysis_data, '__dict__'):
+                            logger.info(f"Analysis data attributes: {[attr for attr in dir(analysis_data) if not attr.startswith('_')]}")
+                    except Exception as e:
+                        logger.info(f"Could not extract IC from {artifact}: {e}")
+        except:
+            pass
+
+        logger.info("Data health checks completed")
+
+    except Exception as e:
+        logger.error(f"Error during data health checks: {e}")
+        # Don't fail the workflow for health check errors
+
+
 def main():
     """Main workflow execution function."""
     logger.info("Starting Crypto Trading Workflow")
@@ -168,6 +230,9 @@ def main():
             sar = SigAnaRecord(recorder, ana_long_short=True, ann_scaler=ann_scaler)
             sar.generate()
             logger.info("Signal analysis completed")
+
+            # Data health checks
+            perform_data_health_checks(recorder, sar)
 
             # Portfolio Analysis / Backtesting
             par = PortAnaRecord(recorder, port_analysis_config, risk_analysis_freq=config_manager.get_workflow_config()["frequency"])

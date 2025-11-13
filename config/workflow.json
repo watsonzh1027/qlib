@@ -25,7 +25,7 @@
     "account": 1000000,
     "benchmark": "BTCUSDT",
     "exchange_kwargs": {
-      "freq": "1min",
+      "freq": "15min",
       "limit_threshold": null,
       "deal_price": "close",
       "open_cost": 0.001,
@@ -36,7 +36,7 @@
   "workflow": {
     "start_time": "2025-11-01",
     "end_time": "2025-11-08",
-    "frequency": "1m",
+    "frequency": "15min",
     "instruments_limit": 50
   },
   "model": {
@@ -61,28 +61,13 @@
     }
   },
   "data_handler_config": {
-    "class": "DataHandlerLP",
-    "module_path": "qlib.data.dataset.handler",
+    "class": "Alpha158",
+    "module_path": "qlib.contrib.data.handler",
     "kwargs": {
       "start_time": "<workflow.start_time>",
       "end_time": "<workflow.end_time>",
       "instruments": "<data.symbols>",
-      "data_loader": {
-        "class": "QlibDataLoader",
-        "kwargs": {
-          "config": {
-            "feature": [
-              "$open",
-              "$high", 
-              "$low",
-              "$close",
-              "$volume"
-            ],
-            "label": ["$close"]
-          },
-          "freq": "1min"
-        }
-      }
+      "freq": "15min"
     }
   },
   "trading": {
@@ -109,7 +94,7 @@
       "class": "SimulatorExecutor",
       "module_path": "qlib.backtest.executor",
       "kwargs": {
-        "time_per_step": "1min",
+        "time_per_step": "15min",
         "generate_portfolio_metrics": true
       }
     },
@@ -124,16 +109,9 @@
     "backtest": {
       "start_time": "<backtest.start_time>",
       "end_time": "<backtest.end_time>",
-      "account": "<backtest.initial_capital>",
+      "account": "<backtest.account>",
       "benchmark": null,
-      "exchange_kwargs": {
-        "freq": "1min",
-        "limit_threshold": null,
-        "deal_price": "close",
-        "open_cost": "<trading.open_cost>",
-        "close_cost": "<trading.close_cost>",
-        "min_cost": "<trading.min_cost>"
-      }
+      "exchange_kwargs": "<backtest.exchange_kwargs>"
     }
   }
 }

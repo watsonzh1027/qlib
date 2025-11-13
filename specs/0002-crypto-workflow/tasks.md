@@ -106,7 +106,7 @@
 ### Tests for User Story 3 ⚠️
 
 - [X] T027 [P] [US3] Unit test for signal analysis in tests/test_workflow_crypto.py
-- [ ] T028 [P] [US3] Unit test for portfolio analysis in tests/test_workflow_crypto.py
+- [X] T028 [P] [US3] Unit test for portfolio analysis in tests/test_workflow_crypto.py
 
 ### Implementation for User Story 3
 

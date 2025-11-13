@@ -9,3 +9,4 @@ pandas>=2.0.0
 qlib>=0.9.0
 pytest>=8.0.0
 pytest-cov>=4.0.0
+gymnasium>=1.0.0

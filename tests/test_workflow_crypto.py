@@ -1012,7 +1012,7 @@ class TestWorkflowCrypto(unittest.TestCase):
             mock_config_manager_class.return_value = mock_config_manager
 
             # Mock all config methods
-            mock_config_manager.get_workflow_config.return_value = {'start_time': '2025-11-01', 'end_time': '2025-11-08'}
+            mock_config_manager.get_workflow_config.return_value = {'start_time': '2025-11-01', 'end_time': '2025-11-08', 'frequency': '15min'}
             mock_config_manager.get_model_config.return_value = {'type': 'GBDT'}
             mock_config_manager.get_model_config_full.return_value = {'class': 'LGBModel', 'module_path': 'qlib.contrib.model.gbdt', 'kwargs': {}}
             mock_config_manager.get_data_handler_config.return_value = {'class': 'DataHandlerLP'}

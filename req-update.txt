@@ -71,7 +71,6 @@ graphql-relay==3.2.0
 greenlet==3.2.4
 grpcio==1.76.0
 gunicorn==23.0.0
-gym==0.26.2
 gym-notices==0.1.0
 gymnasium @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_gymnasium_1758637279/work
 h11==0.16.0
