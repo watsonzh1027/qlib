@@ -113,7 +113,7 @@ class DataHealthChecker:
                         large_steps = pct_change[pct_change > threshold]
                         result_dict["instruments"].append(filename)
                         result_dict["col_name"].append(col)
-                        result_dict["date"].append(large_steps.index.to_list()[0][1].strftime("%Y-%m-%d"))
+                        result_dict["date"].append(large_steps.index[0].strftime("%Y-%m-%d"))
                         result_dict["pct_change"].append(pct_change.max())
                         affected_columns.append(col)
 
@@ -134,8 +134,9 @@ class DataHealthChecker:
         for filename, df in self.data.items():
             if not all(column in df.columns for column in required_columns):
                 missing_required_columns = [column for column in required_columns if column not in df.columns]
-                result_dict["instruments"].append(filename)
-                result_dict["missing_col"] += missing_required_columns
+                for missing_col in missing_required_columns:
+                    result_dict["instruments"].append(filename)
+                    result_dict["missing_col"].append(missing_col)
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
         if not result_df.empty:
@@ -157,13 +158,11 @@ class DataHealthChecker:
             if "factor" not in df.columns:
                 result_dict["instruments"].append(filename)
                 result_dict["missing_factor_col"].append(True)
-            if df["factor"].isnull().all():
-                if filename in result_dict["instruments"]:
-                    result_dict["missing_factor_data"].append(True)
-                else:
-                    result_dict["instruments"].append(filename)
-                    result_dict["missing_factor_col"].append(False)
-                    result_dict["missing_factor_data"].append(True)
+                result_dict["missing_factor_data"].append(False)
+            elif df["factor"].isnull().all():
+                result_dict["instruments"].append(filename)
+                result_dict["missing_factor_col"].append(False)
+                result_dict["missing_factor_data"].append(True)
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
         if not result_df.empty:

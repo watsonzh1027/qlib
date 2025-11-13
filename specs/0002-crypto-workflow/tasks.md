@@ -26,7 +26,7 @@
 - [X] T001 Create examples/workflow_crypto.py with basic structure
 - [X] T002 Extend scripts/config_manager.py with workflow-specific methods
 - [X] T003 Update config/workflow.json with crypto workflow sections
-- [ ] T004 Create tests/test_workflow_crypto.py test file structure
+- [X] T004 Create tests/test_workflow_crypto.py test file structure
 
 ---
 
@@ -63,10 +63,10 @@
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Implement data loading from qlib crypto provider in examples/workflow_crypto.py
-- [ ] T015 [US1] Implement model training with GBDT on crypto data in examples/workflow_crypto.py
-- [ ] T016 [US1] Implement signal generation using trained model in examples/workflow_crypto.py
-- [ ] T017 [US1] Implement backtesting with crypto-specific parameters in examples/workflow_crypto.py
+- [X] T014 [US1] Implement data loading from qlib crypto provider in examples/workflow_crypto.py
+- [X] T015 [US1] Implement model training with GBDT on crypto data in examples/workflow_crypto.py
+- [X] T016 [US1] Implement signal generation using trained model in examples/workflow_crypto.py
+- [X] T017 [US1] Implement backtesting with crypto-specific parameters in examples/workflow_crypto.py
 - [X] T018 [US1] Add experiment logging and recorder setup in examples/workflow_crypto.py
 - [X] T019 [US1] Add error handling and validation in examples/workflow_crypto.py
 
@@ -82,8 +82,8 @@
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T020 [P] [US2] Unit test for config parameter loading in tests/test_workflow_crypto.py
-- [ ] T021 [P] [US2] Integration test for framework adaptation in tests/test_workflow_crypto.py
+- [X] T020 [P] [US2] Unit test for config parameter loading in tests/test_workflow_crypto.py
+- [X] T021 [P] [US2] Integration test for framework adaptation in tests/test_workflow_crypto.py
 
 ### Implementation for User Story 2
 
@@ -105,7 +105,7 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T027 [P] [US3] Unit test for signal analysis in tests/test_workflow_crypto.py
+- [X] T027 [P] [US3] Unit test for signal analysis in tests/test_workflow_crypto.py
 - [ ] T028 [P] [US3] Unit test for portfolio analysis in tests/test_workflow_crypto.py
 
 ### Implementation for User Story 3
@@ -123,12 +123,12 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T033 [P] Documentation updates in docs/ for crypto workflow
-- [ ] T034 Code cleanup and refactoring in examples/workflow_crypto.py
-- [ ] T035 Performance optimization for 15-minute data processing
-- [ ] T036 [P] Additional unit tests in tests/test_workflow_crypto.py
-- [ ] T037 Security and error handling improvements
-- [ ] T038 Run quickstart.md validation and update if needed
+- [X] T033 [P] Documentation updates in docs/ for crypto workflow
+- [X] T034 Code cleanup and refactoring in examples/workflow_crypto.py
+- [X] T035 Performance optimization for 15-minute data processing
+- [X] T036 [P] Additional unit tests in tests/test_workflow_crypto.py
+- [X] T037 Security and error handling improvements
+- [X] T038 Run quickstart.md validation and update if needed
 
 ---
 

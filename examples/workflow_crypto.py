@@ -25,6 +25,7 @@ import sys
 import os
 import logging
 from pathlib import Path
+import pandas as pd
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -42,6 +43,22 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def get_ann_scaler(freq: str) -> int:
+    """Calculate annualization scaler based on frequency."""
+    try:
+        # Use pandas to parse frequency string and calculate periods in a year
+        delta = pd.to_timedelta(freq)
+        # Assuming 365 days in a year for crypto
+        periods_in_year = pd.Timedelta(days=365) / delta
+        return int(periods_in_year)
+    except (ValueError, TypeError):
+        logger.warning(f"Could not parse frequency '{freq}'. Defaulting ann_scaler to 252.")
+        # Fallback for common qlib daily frequency
+        if freq.lower() == 'day':
+            return 365
+        return 252 # Default for traditional markets
+
 
 def verify_data_availability():
     """Verify that crypto data is available and accessible."""
@@ -137,6 +154,9 @@ def main():
         # Add signal to strategy kwargs
         port_analysis_config["strategy"]["kwargs"]["signal"] = (model, dataset)
 
+        # Calculate ann_scaler based on workflow frequency
+        ann_scaler = get_ann_scaler(config_manager.get_workflow_config()["frequency"])
+        logger.info(f"Calculated annualization scaler: {ann_scaler}")
         with R.start(experiment_name="crypto_workflow"):
             # Signal generation
             recorder = R.get_recorder()
@@ -145,12 +165,12 @@ def main():
             logger.info("Signals generated successfully")
 
             # Signal Analysis
-            sar = SigAnaRecord(recorder)
+            sar = SigAnaRecord(recorder, ana_long_short=True, ann_scaler=ann_scaler)
             sar.generate()
             logger.info("Signal analysis completed")
 
             # Portfolio Analysis / Backtesting
-            par = PortAnaRecord(recorder, port_analysis_config, "15min")
+            par = PortAnaRecord(recorder, port_analysis_config, risk_analysis_freq=config_manager.get_workflow_config()["frequency"])
             par.generate()
             logger.info("Backtesting completed")
 

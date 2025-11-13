@@ -7,7 +7,7 @@ import logging
 import requests
 import time
 from typing import List, Optional, Dict, Any
-from config_manager import ConfigManager
+from scripts.config_manager import ConfigManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

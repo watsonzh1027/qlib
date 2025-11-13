@@ -160,8 +160,17 @@ class ConfigManager:
             if isinstance(obj, str):
                 if obj == "<data_handler_config>":
                     return self.get_data_handler_config()
+                elif obj == "<workflow.start_time>":
+                    return self.get_workflow_config()["start_time"]
                 elif obj == "<workflow.end_time>":
                     return self.get_workflow_config()["end_time"]
+                elif obj == "<workflow.frequency>":
+                    freq = self.get_workflow_config()["frequency"]
+                    return self._convert_ccxt_freq_to_qlib(freq)
+                elif obj == "<data.symbols>":
+                    # Convert CCXT symbols to qlib format for qlib compatibility
+                    ccxt_symbols = self.get_crypto_symbols()
+                    return [symbol.replace('/', '') for symbol in ccxt_symbols]
                 else:
                     return obj
             elif isinstance(obj, dict):
@@ -211,8 +220,10 @@ class ConfigManager:
                     return self.get_backtest_config().get("start_time", self.get_workflow_config()["start_time"])
                 elif obj == "<backtest.end_time>":
                     return self.get_backtest_config().get("end_time", self.get_workflow_config()["end_time"])
-                elif obj == "<backtest.initial_capital>":
-                    return self.get_backtest_config().get("initial_capital", 1000000)
+                elif obj == "<backtest.account>":
+                    return self.get_backtest_config().get("account", 1000000)
+                elif obj == "<backtest.exchange_kwargs>":
+                    return self.get_backtest_config().get("exchange_kwargs", {})
                 elif obj == "<trading.open_cost>":
                     return self.get_trading_config().get("open_cost", 0.001)
                 elif obj == "<trading.close_cost>":

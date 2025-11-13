@@ -32,7 +32,7 @@ import requests
 from typing import List, Dict
 import qlib
 from qlib.data import D
-from config_manager import ConfigManager
+from scripts.config_manager import ConfigManager
 import argparse
 
 # Load configuration

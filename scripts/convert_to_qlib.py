@@ -174,10 +174,6 @@ def convert_to_qlib():
     output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data"))
     os.makedirs(output_dir, exist_ok=True)
     
-    # Get interval from data_collection and convert to qlib freq
-    interval = data_collection.get("interval", "1m")
-    freq = config_manager._convert_ccxt_freq_to_qlib(interval)
-    
     # Get convertor parameters
     date_field_name = data_convertor.get("date_field_name", "timestamp")
     include_fields = data_convertor.get("include_fields", ["open", "high", "low", "close", "volume"])
@@ -189,48 +185,70 @@ def convert_to_qlib():
         exclude_fields_list.append('interval')
     exclude_fields = ','.join(exclude_fields_list)
     
-    all_data = {}  # Dictionary to hold all symbol data in memory
+    # Convert data for both 1min and 15min frequencies
+    frequencies = ["1min", "15min"]
     
-    for symbol_dir in os.listdir(input_dir):
-        symbol_path = os.path.join(input_dir, symbol_dir)
-        if os.path.isdir(symbol_path):
-            symbol_data = []
-            for file in os.listdir(symbol_path):
-                if file.endswith(".csv"):
-                    df = pd.read_csv(os.path.join(symbol_path, file))
-                    symbol_data.append(df)
-            if symbol_data:
-                # Merge and deduplicate data for this symbol
-                merged_df = pd.concat(symbol_data).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
-                # Convert timestamp to datetime string for Qlib compatibility
-                merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
-                if validate_data_integrity(merged_df, freq):
-                    all_data[symbol_dir] = merged_df  # Store in memory
-                else:
-                    print(f"Data integrity validation failed for {symbol_dir}")
+    for target_freq in frequencies:
+        print(f"Converting data to {target_freq} frequency...")
+        
+        all_data = {}  # Dictionary to hold all symbol data in memory
+        
+        for symbol_dir in os.listdir(input_dir):
+            symbol_path = os.path.join(input_dir, symbol_dir)
+            if os.path.isdir(symbol_path):
+                symbol_data = []
+                for file in os.listdir(symbol_path):
+                    if file.endswith(".csv"):
+                        df = pd.read_csv(os.path.join(symbol_path, file))
+                        # Resample to target frequency if needed
+                        if target_freq != "1min":
+                            df[date_field_name] = pd.to_datetime(df[date_field_name])
+                            df = df.set_index(date_field_name)
+                            # Resample OHLCV data appropriately
+                            resampled = df.resample(target_freq).agg({
+                                'open': 'first',
+                                'high': 'max', 
+                                'low': 'min',
+                                'close': 'last',
+                                'volume': 'sum'
+                            }).dropna()
+                            df = resampled.reset_index()
+                        
+                        symbol_data.append(df)
+                if symbol_data:
+                    # Merge and deduplicate data for this symbol
+                    merged_df = pd.concat(symbol_data).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
+                    # Convert timestamp to datetime string for Qlib compatibility
+                    merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
+                    if validate_data_integrity(merged_df, target_freq):
+                        all_data[symbol_dir] = merged_df  # Store in memory
+                    else:
+                        print(f"Data integrity validation failed for {symbol_dir}")
 
-    # Now process all data at once
-    if not all_data:
-        print("No valid data found.")
-        return
+        # Now process all data at once
+        if not all_data:
+            print(f"No valid data found for {target_freq}.")
+            continue
 
-    # Create temporary directory for CSV files
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for symbol, df in all_data.items():
-            df.to_csv(os.path.join(temp_dir, f"{symbol}.csv"), index=False)
+        # Create temporary directory for CSV files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for symbol, df in all_data.items():
+                df.to_csv(os.path.join(temp_dir, f"{symbol}.csv"), index=False)
 
-        # Run DumpDataCrypto on the temp dir (skips calendar creation for crypto)
-        dumper = DumpDataCrypto(
-            data_path=temp_dir,
-            qlib_dir=output_dir,
-            freq=freq,
-            date_field_name=date_field_name,
-            symbol_field_name=symbol_field_name,
-            exclude_fields=exclude_fields,
-            include_fields=','.join(include_fields),
-            max_workers=4
-        )
-        dumper.dump()
+            # Run DumpDataCrypto on the temp dir (skips calendar creation for crypto)
+            dumper = DumpDataCrypto(
+                data_path=temp_dir,
+                qlib_dir=output_dir,
+                freq=target_freq,
+                date_field_name=date_field_name,
+                symbol_field_name=symbol_field_name,
+                exclude_fields=exclude_fields,
+                include_fields=','.join(include_fields),
+                max_workers=4
+            )
+            dumper.dump()
+        
+        print(f"Completed conversion to {target_freq}")
 
 if __name__ == "__main__":
     convert_to_qlib()
