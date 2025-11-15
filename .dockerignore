@@ -5,4 +5,23 @@ __pycache__
 .Python
 .env
 .git
+node_modules/
+dist/
+build/
+coverage/
+*.log*
+*.tmp
+*.swp
+.vscode/
+.idea/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+mlruns/
+data/
+cache/
+logs/
+htmlcov/
+.DS_Store
+Thumbs.db
 

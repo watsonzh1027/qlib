@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import tempfile
 import numpy as np
+import time
 from pathlib import Path
 from typing import List
 from functools import partial
@@ -222,6 +223,11 @@ def convert_to_qlib():
                     merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
                     if validate_data_integrity(merged_df, target_freq):
                         all_data[symbol_dir] = merged_df  # Store in memory
+                        # Log before convert information
+                        start_time = merged_df[date_field_name].min()
+                        end_time = merged_df[date_field_name].max()
+                        total_records = len(merged_df)
+                        logger.info(f"Before convert - Symbol: {symbol_dir}, Start: {start_time}, End: {end_time}, Records: {total_records}")
                     else:
                         print(f"Data integrity validation failed for {symbol_dir}")
 
@@ -236,6 +242,7 @@ def convert_to_qlib():
                 df.to_csv(os.path.join(temp_dir, f"{symbol}.csv"), index=False)
 
             # Run DumpDataCrypto on the temp dir (skips calendar creation for crypto)
+            start_time_convert = time.time()
             dumper = DumpDataCrypto(
                 data_path=temp_dir,
                 qlib_dir=output_dir,
@@ -247,6 +254,15 @@ def convert_to_qlib():
                 max_workers=4
             )
             dumper.dump()
+            end_time_convert = time.time()
+            
+            # Count total features (bin files)
+            total_features = 0
+            for root, dirs, files in os.walk(output_dir):
+                total_features += len([f for f in files if f.endswith('.bin')])
+            
+            elapsed_time = end_time_convert - start_time_convert
+            logger.info(f"After convert - Target folder: {output_dir}, Total features: {total_features}, Time taken: {elapsed_time:.2f}s")
         
         print(f"Completed conversion to {target_freq}")
 

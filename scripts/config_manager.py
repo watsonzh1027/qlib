@@ -7,8 +7,33 @@ class ConfigManager:
     def __init__(self, config_path="config/workflow.json"):
         self.config_path = config_path
         self.config = self._load_config()
+        self._custom_instruments = None  # For overriding default instruments
 
     def _convert_ccxt_freq_to_qlib(self, ccxt_freq):
+        """
+        Convert CCXT frequency format to qlib frequency format.
+
+        CCXT format: 15m, 1h, 1d, etc.
+        Qlib format: 15min, 1hour, 1day, etc.
+        """
+        # Map CCXT time units to qlib time units
+        unit_map = {
+            'm': 'min',
+            'h': 'hour',
+            'd': 'day',
+            'w': 'week',
+            'M': 'month'
+        }
+
+        # Use regex to parse CCXT format (e.g., "15m" -> "15min")
+        match = re.match(r'^(\d+)([mhdwM])$', ccxt_freq)
+        if match:
+            number, unit = match.groups()
+            qlib_unit = unit_map.get(unit, unit)
+            return f"{number}{qlib_unit}"
+
+        # If no match, return as-is (might already be in qlib format)
+        return ccxt_freq
         """
         Convert CCXT frequency format to qlib frequency format.
 
@@ -124,13 +149,25 @@ class ConfigManager:
 
         return resolve_placeholders(config)
 
+    def set_custom_instruments(self, instruments):
+        """
+        Set custom instruments for single-asset training.
+        
+        Args:
+            instruments (list): List of instrument symbols (e.g., ["BTC/USDT"])
+        """
+        self._custom_instruments = instruments
+
     def get_crypto_symbols(self):
         """
-        Load crypto symbols from the configured symbols file.
+        Load crypto symbols from the configured symbols file or custom instruments.
 
         Returns:
             list: List of crypto symbols
         """
+        if self._custom_instruments is not None:
+            return self._custom_instruments
+
         symbols_file = self.config.get("data", {}).get("symbols", "config/top50_symbols.json")
 
         # If symbols_file is relative, make it relative to project root
@@ -193,12 +230,33 @@ class ConfigManager:
 
     def get_backtest_config(self):
         """
-        Get backtest configuration parameters.
+        Get backtest configuration with resolved placeholders.
 
         Returns:
-            dict: Backtest configuration
+            dict: Backtest configuration with resolved template values
         """
-        return self.config.get("backtest", {})
+        config = self.config.get("backtest", {}).copy()
+
+        # Resolve template placeholders
+        def resolve_placeholders(obj):
+            if isinstance(obj, str):
+                if obj == "<workflow.start_time>":
+                    return self.get_workflow_config()["start_time"]
+                elif obj == "<workflow.end_time>":
+                    return self.get_workflow_config()["end_time"]
+                elif obj == "<workflow.frequency>":
+                    freq = self.get_workflow_config()["frequency"]
+                    return self._convert_ccxt_freq_to_qlib(freq)
+                else:
+                    return obj
+            elif isinstance(obj, dict):
+                return {k: resolve_placeholders(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [resolve_placeholders(item) for item in obj]
+            else:
+                return obj
+
+        return resolve_placeholders(config)
 
     def get_port_analysis_config(self):
         """

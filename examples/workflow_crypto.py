@@ -32,6 +32,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from scripts.config_manager import ConfigManager
+from scripts.check_data_quality import check_data_quality
 from qlib.utils import init_instance_by_config
 from qlib.workflow import R
 from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
@@ -100,15 +101,60 @@ def load_crypto_dataset(qlib, config_manager):
 
     return dataset
 
-def train_crypto_model(dataset, model_config_full):
-    """Train machine learning model on crypto dataset."""
-    logger.info("Training crypto model...")
-
+def train_single_crypto_model(config_manager, symbol, qlib):
+    """Train a model for a single crypto symbol."""
+    logger.info(f"Training model for {symbol}...")
+    
+    # Set custom instruments to only this symbol
+    config_manager.set_custom_instruments([symbol])
+    
+    # Load dataset for this symbol
+    dataset_config = config_manager.get_dataset_config()
+    dataset = init_instance_by_config(dataset_config)
+    
+    # Train model
+    model_config_full = config_manager.get_model_config_full()
     model = init_instance_by_config(model_config_full)
     model.fit(dataset)
-    logger.info("Crypto model trained successfully")
+    
+    logger.info(f"Model trained successfully for {symbol}")
+    return model, dataset
 
-    return model
+def generate_signals_for_all_models(models_dict, config_manager, recorder):
+    """Generate signals using all trained models."""
+    logger.info("Generating signals for all models...")
+    
+    all_predictions = []
+    
+    for symbol, (model, dataset) in models_dict.items():
+        logger.info(f"Generating signals for {symbol}...")
+        
+        # Generate prediction for this model
+        pred = model.predict(dataset)
+        if isinstance(pred, pd.Series):
+            pred = pred.to_frame(symbol.replace('/', ''))  # Use qlib format for column name
+        
+        all_predictions.append(pred)
+        logger.info(f"Generated predictions for {symbol} with shape {pred.shape}")
+    
+    # Combine all predictions
+    if all_predictions:
+        combined_predictions = pd.concat(all_predictions, axis=1)
+        # Save combined predictions
+        recorder.save_objects(**{"pred.pkl": combined_predictions})
+        logger.info(f"Combined predictions saved with {len(combined_predictions.columns)} symbols: {list(combined_predictions.columns)}")
+        
+        # Also save labels if available (using first dataset as example)
+        first_dataset = next(iter(models_dict.values()))[1]
+        if hasattr(first_dataset, 'prepare'):
+            try:
+                raw_label = SignalRecord.generate_label(first_dataset)
+                if raw_label is not None:
+                    recorder.save_objects(**{"label.pkl": raw_label})
+            except Exception as e:
+                logger.warning(f"Could not generate labels: {e}")
+    
+    return combined_predictions
 
 def perform_data_health_checks(recorder, sig_ana_record):
     """Perform health checks on signal analysis results to detect issues early."""
@@ -177,6 +223,13 @@ def main():
     logger.info("Starting Crypto Trading Workflow")
 
     try:
+        # Data quality check
+        logger.info("Performing data quality checks...")
+        if not check_data_quality():
+            logger.error("Data quality checks failed. Aborting workflow.")
+            sys.exit(1)
+        logger.info("Data quality checks passed.")
+
         # Load configuration
         config_manager = ConfigManager()
         workflow_config = config_manager.get_workflow_config()
@@ -201,11 +254,25 @@ def main():
         # Initialize qlib
         qlib = initialize_qlib_crypto(data_path)
 
-        # Load and prepare dataset
-        dataset = load_crypto_dataset(qlib, config_manager)
-
-        # Train model
-        model = train_crypto_model(dataset, model_config_full)
+        # Get all symbols for training
+        all_symbols = config_manager.get_crypto_symbols()
+        logger.info(f"Training models for {len(all_symbols)} crypto symbols: {all_symbols}")
+        
+        # Train a model for each crypto symbol
+        models_dict = {}
+        for symbol in all_symbols:
+            try:
+                model, dataset = train_single_crypto_model(config_manager, symbol, qlib)
+                models_dict[symbol] = (model, dataset)
+                logger.info(f"Successfully trained model for {symbol}")
+            except Exception as e:
+                logger.error(f"Failed to train model for {symbol}: {e}")
+                continue
+        
+        if not models_dict:
+            raise RuntimeError("No models were successfully trained")
+        
+        logger.info(f"Successfully trained {len(models_dict)} models")
 
         # End the MLflow run started by model.fit()
         mlflow.end_run()
@@ -213,17 +280,19 @@ def main():
         # Generate signals and run backtesting
         logger.info("Generating signals and running backtesting...")
 
-        # Add signal to strategy kwargs
-        port_analysis_config["strategy"]["kwargs"]["signal"] = (model, dataset)
-
         # Calculate ann_scaler based on workflow frequency
         ann_scaler = get_ann_scaler(config_manager.get_workflow_config()["frequency"])
         logger.info(f"Calculated annualization scaler: {ann_scaler}")
+        
         with R.start(experiment_name="crypto_workflow"):
-            # Signal generation
+            # Signal generation using all models
             recorder = R.get_recorder()
-            sr = SignalRecord(model, dataset, recorder)
-            sr.generate()
+            combined_predictions = generate_signals_for_all_models(models_dict, config_manager, recorder)
+            
+            if combined_predictions is None or combined_predictions.empty:
+                logger.error("No predictions generated from any model")
+                return
+            
             logger.info("Signals generated successfully")
 
             # Signal Analysis
@@ -235,6 +304,10 @@ def main():
             perform_data_health_checks(recorder, sar)
 
             # Portfolio Analysis / Backtesting
+            # Use the first model and dataset for port analysis config (qlib requirement)
+            first_model, first_dataset = next(iter(models_dict.values()))
+            port_analysis_config["strategy"]["kwargs"]["signal"] = (first_model, first_dataset)
+            
             par = PortAnaRecord(recorder, port_analysis_config, risk_analysis_freq=config_manager.get_workflow_config()["frequency"])
             par.generate()
             logger.info("Backtesting completed")

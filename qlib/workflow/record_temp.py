@@ -331,18 +331,29 @@ class SigAnaRecord(ACRecordTemp):
         objects = {"ic.pkl": ic, "ric.pkl": ric}
         if self.ana_long_short:
             long_short_r, long_avg_r = calc_long_short_return(pred.iloc[:, 0], label.iloc[:, self.label_col])
+            # Calculate short average return
+            df = pd.DataFrame({"pred": pred.iloc[:, 0], "label": label.iloc[:, self.label_col]})
+            group = df.groupby(level="datetime", group_keys=False)
+            quantile = 0.2  # Same quantile as calc_long_short_return
+            def N(x):
+                return int(len(x) * quantile)
+            r_short = group.apply(lambda x: x.nsmallest(N(x), columns="pred").label.mean())
+            
             metrics.update(
                 {
                     "Long-Short Ann Return": long_short_r.mean() * self.ann_scaler,
                     "Long-Short Ann Sharpe": long_short_r.mean() / long_short_r.std() * self.ann_scaler**0.5,
                     "Long-Avg Ann Return": long_avg_r.mean() * self.ann_scaler,
                     "Long-Avg Ann Sharpe": long_avg_r.mean() / long_avg_r.std() * self.ann_scaler**0.5,
+                    "Short-Avg Ann Return": r_short.mean() * self.ann_scaler,
+                    "Short-Avg Ann Sharpe": r_short.mean() / r_short.std() * self.ann_scaler**0.5,
                 }
             )
             objects.update(
                 {
                     "long_short_r.pkl": long_short_r,
                     "long_avg_r.pkl": long_avg_r,
+                    "short_avg_r.pkl": r_short,
                 }
             )
         self.recorder.log_metrics(**metrics)
@@ -352,7 +363,7 @@ class SigAnaRecord(ACRecordTemp):
     def list(self):
         paths = ["ic.pkl", "ric.pkl"]
         if self.ana_long_short:
-            paths.extend(["long_short_r.pkl", "long_avg_r.pkl"])
+            paths.extend(["long_short_r.pkl", "long_avg_r.pkl", "short_avg_r.pkl"])
         return paths
 
 

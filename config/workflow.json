@@ -8,7 +8,7 @@
   "data_collection": {
     "interval": "1m",
     "api_timeout": 10,
-    "start_time": "2025-11-01",
+    "start_time": "2024-11-01",
     "end_time": "",
     "limit": 1000,
     "overlap_minutes": 5,
@@ -19,25 +19,26 @@
     "include_fields": ["open", "high", "low", "close", "volume"],
     "instruments_file": "instruments.txt"
   },
-  "backtest": {
-    "start_time": "2025-11-01",
+  "workflow": {
+    "start_time": "2025-01-01",
     "end_time": "2025-11-08",
+    "frequency": "15min",
+    "instruments_limit": 50
+  },
+  "backtest": {
+      "start_time": "<workflow.start_time>",
+      "end_time": "<workflow.end_time>",
     "account": 1000000,
-    "benchmark": "BTCUSDT",
+    "benchmark": null,
     "exchange_kwargs": {
       "freq": "15min",
       "limit_threshold": null,
       "deal_price": "close",
       "open_cost": 0.001,
       "close_cost": 0.001,
-      "min_cost": 0.001
+      "min_cost": 0.001,
+      "trade_unit": null
     }
-  },
-  "workflow": {
-    "start_time": "2025-11-01",
-    "end_time": "2025-11-08",
-    "frequency": "15min",
-    "instruments_limit": 50
   },
   "model": {
     "type": "GBDT",
@@ -67,7 +68,9 @@
       "start_time": "<workflow.start_time>",
       "end_time": "<workflow.end_time>",
       "instruments": "<data.symbols>",
-      "freq": "15min"
+      "freq": "15min",
+      "fit_start_time": "<workflow.start_time>",
+      "fit_end_time": "2025-08-01"
     }
   },
   "trading": {
@@ -83,9 +86,9 @@
     "kwargs": {
       "handler": "<data_handler_config>",
       "segments": {
-        "train": ["2025-11-01", "2025-11-03"],
-        "valid": ["2025-11-03", "2025-11-05"],
-        "test": ["2025-11-05", "<workflow.end_time>"]
+        "train": ["<workflow.start_time>", "2025-06-01"],
+        "valid": ["2025-06-01", "2025-09-01"],
+        "test": ["2025-09-01", "<workflow.end_time>"]
       }
     }
   },

@@ -127,7 +127,7 @@ class PortfolioMetrics:
         trade_end_time: Union[str, pd.Timestamp],
     ) -> Optional[float]:
         if self.bench is None:
-            return None
+            return 0.0  # Return zero benchmark return when no benchmark is configured
 
         def cal_change(x):
             return (x + 1).prod()

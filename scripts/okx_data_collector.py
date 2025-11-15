@@ -240,6 +240,7 @@ def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", int
 
             # parts[0] is timestamp, parts[1] is symbol
             timestamp_str = parts[0].strip()
+            logger.debug(f"[get_first_timestamp_from_csv]Symbol {symbol}: first timestamp_str: {timestamp_str}")
             return pd.to_datetime(timestamp_str)
 
     except Exception as e:
@@ -315,7 +316,7 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     if need_earlier:
         adjusted_start = req_start_ts
     else:
-        adjusted_start = max(req_start_ts, last_timestamp - overlap_delta)
+        adjusted_start = last_timestamp - overlap_delta
 
     logger.info(f"Symbol {symbol}: Adjusting fetch window from {requested_start} to {adjusted_start.isoformat()}")
     return adjusted_start.isoformat(), requested_end, True
