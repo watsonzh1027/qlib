@@ -46,19 +46,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def get_ann_scaler(freq: str) -> int:
-    """Calculate annualization scaler based on frequency."""
+    """Calculate annualization scaler based on frequency for cryptocurrency markets."""
+    
+    # First, convert CCXT format to QLib format if needed
+    freq = convert_ccxt_to_qlib_freq(freq)
+    
     try:
         # Use pandas to parse frequency string and calculate periods in a year
         delta = pd.to_timedelta(freq)
-        # Assuming 365 days in a year for crypto
+        # Assuming 365 days in a year for crypto (24/7 trading)
         periods_in_year = pd.Timedelta(days=365) / delta
-        return int(periods_in_year)
-    except (ValueError, TypeError):
-        logger.warning(f"Could not parse frequency '{freq}'. Defaulting ann_scaler to 252.")
-        # Fallback for common qlib daily frequency
-        if freq.lower() == 'day':
-            return 365
-        return 252 # Default for traditional markets
+        ann_scaler = int(periods_in_year)
+        
+        # Validate the calculated ann_scaler
+        if ann_scaler <= 0:
+            raise ValueError(f"Invalid ann_scaler calculated: {ann_scaler}")
+            
+        logger.info(f"Calculated ann_scaler={ann_scaler} for frequency='{freq}'")
+        return ann_scaler
+        
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Could not parse frequency '{freq}': {e}")
+        
+        # Fallback to predefined mappings for common frequencies
+        freq_mapping = {
+            '1min': 365 * 24 * 60,      # 1分钟: 365天 × 24小时 × 60分钟
+            '5min': 365 * 24 * 12,      # 5分钟: 365天 × 24小时 × 12个5分钟
+            '15min': 365 * 24 * 4,       # 15分钟: 365天 × 24小时 × 4个15分钟
+            '30min': 365 * 24 * 2,       # 30分钟: 365天 × 24小时 × 2个30分钟
+            '1hour': 365 * 24,           # 1小时: 365天 × 24小时
+            '4hour': 365 * 6,            # 4小时: 365天 × 6个4小时
+            '1day': 365,                 # 1天: 365天
+            '1week': 52,                 # 1周: 52周
+        }
+        
+        # Try to find the frequency in the mapping
+        for known_freq, scaler in freq_mapping.items():
+            if known_freq in freq or freq in known_freq:
+                logger.info(f"Using predefined ann_scaler={scaler} for frequency='{freq}'")
+                return scaler
+        
+        # Final fallback for crypto: use daily frequency (365)
+        logger.warning(f"Unknown frequency '{freq}', defaulting to crypto daily ann_scaler=365")
+        return 365
 
 
 def verify_data_availability():

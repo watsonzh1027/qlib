@@ -23,7 +23,7 @@ except ImportError:
 # production code must not inject test shims.
 
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 import logging
@@ -33,6 +33,9 @@ from typing import List, Dict
 import qlib
 from qlib.data import D
 from scripts.config_manager import ConfigManager
+from scripts.postgres_storage import PostgreSQLStorage
+from scripts.postgres_config import PostgresConfig
+from sqlalchemy import text
 import argparse
 
 # Load configuration
@@ -45,9 +48,25 @@ LOG_DIR = config.get("log_dir", "logs")
 # Get timeframe from config to avoid hardcoding
 TIMEFRAME = config.get("data_collection", {}).get("interval", "1m")
 
-# Ensure directories exist
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+# Global variables for output configuration
+_global_output_format = "csv"
+_global_postgres_storage = None
+
+def set_global_output_config(output_format: str, postgres_storage=None):
+    """Set global output configuration for save_klines function."""
+    global _global_output_format, _global_postgres_storage
+    _global_output_format = output_format
+    _global_postgres_storage = postgres_storage
+
+# Global variables for output configuration
+_global_output_format = "csv"
+_global_postgres_storage = None
+
+def set_global_output_config(output_format: str = "csv", postgres_storage: PostgreSQLStorage = None):
+    """Set global output configuration for save_klines calls."""
+    global _global_output_format, _global_postgres_storage
+    _global_output_format = output_format
+    _global_postgres_storage = postgres_storage
 
 # Create logs directory
 os.makedirs('logs', exist_ok=True)
@@ -62,6 +81,20 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Configure CCXT logging
+def configure_ccxt_logging(verbose: bool = False):
+    """Configure CCXT library logging level."""
+    ccxt_logger = logging.getLogger('ccxt')
+    ccxt_logger.setLevel(logging.WARNING if not verbose else logging.DEBUG)
+    
+    # Also configure related loggers
+    for logger_name in ['ccxtpro', 'urllib3', 'requests']:
+        log = logging.getLogger(logger_name)
+        log.setLevel(logging.WARNING if not verbose else logging.DEBUG)
+
+# Default: disable verbose CCXT logging
+configure_ccxt_logging(verbose=False)
 
 
 # Global storage
@@ -247,7 +280,75 @@ def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", int
         logger.warning(f"Failed to read first timestamp from {filepath}: {e}")
         return None
 
-def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines", interval: str = "1m") -> tuple[str, str, bool]:
+def get_last_timestamp_from_db(symbol: str, interval: str = "1m", postgres_storage: PostgreSQLStorage = None) -> pd.Timestamp | None:
+    """
+    Read the last timestamp from PostgreSQL database for a symbol.
+
+    Args:
+        symbol: Symbol name
+        interval: Interval string like '1m'
+        postgres_storage: PostgreSQLStorage instance
+
+    Returns:
+        Last timestamp as pd.Timestamp, or None if no data exists
+    """
+    if postgres_storage is None:
+        return None
+
+    try:
+        # Query for the maximum timestamp for this symbol and interval
+        query = text("""
+        SELECT MAX(timestamp) as last_timestamp
+        FROM ohlcv_data
+        WHERE symbol = :symbol AND interval = :interval
+        """)
+        with postgres_storage.engine.connect() as conn:
+            result = conn.execute(query, {"symbol": symbol, "interval": interval})
+            row = result.fetchone()
+            if row and row[0]:
+                # The timestamp is already a timezone-aware datetime from PostgreSQL
+                # Convert to pandas Timestamp, preserving the timezone info
+                return pd.Timestamp(row[0])
+    except Exception as e:
+        logger.warning(f"Failed to get last timestamp from database for {symbol}: {e}")
+
+    return None
+
+def get_first_timestamp_from_db(symbol: str, interval: str = "1m", postgres_storage: PostgreSQLStorage = None) -> pd.Timestamp | None:
+    """
+    Read the first timestamp from PostgreSQL database for a symbol.
+
+    Args:
+        symbol: Symbol name
+        interval: Interval string like '1m'
+        postgres_storage: PostgreSQLStorage instance
+
+    Returns:
+        First timestamp as pd.Timestamp, or None if no data exists
+    """
+    if postgres_storage is None:
+        return None
+
+    try:
+        # Query for the minimum timestamp for this symbol and interval
+        query = text("""
+        SELECT MIN(timestamp) as first_timestamp
+        FROM ohlcv_data
+        WHERE symbol = :symbol AND interval = :interval
+        """)
+        with postgres_storage.engine.connect() as conn:
+            result = conn.execute(query, {"symbol": symbol, "interval": interval})
+            row = result.fetchone()
+            if row and row[0]:
+                # The timestamp is already a timezone-aware datetime from PostgreSQL
+                # Convert to pandas Timestamp, preserving the timezone info
+                return pd.Timestamp(row[0])
+    except Exception as e:
+        logger.warning(f"Failed to get first timestamp from database for {symbol}: {e}")
+
+    return None
+
+def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str, base_dir: str = "data/klines", interval: str = "1m", output_format: str = "csv", postgres_storage: PostgreSQLStorage = None) -> tuple[str, str, bool]:
     """
     Calculate the optimal fetch window for a symbol based on existing data.
 
@@ -257,18 +358,40 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         requested_end: Requested end time string
         base_dir: Base directory for CSV files
         interval: Interval string like '1m'
+        output_format: Output format ("csv" or "postgres")
+        postgres_storage: PostgreSQLStorage instance (required for postgres output)
 
     Returns:
         Tuple of (adjusted_start, adjusted_end, should_fetch)
         should_fetch is False if no new data needed
     """
-    logger.debug(f"calculate_fetch_window called for {symbol} with start={requested_start}, end={requested_end}")
-    print(f"DEBUG: calculate_fetch_window called for {symbol}")  # Temporary debug print
-    last_timestamp = get_last_timestamp_from_csv(symbol, base_dir, interval)
-    first_timestamp = get_first_timestamp_from_csv(symbol, base_dir, interval)
+    logger.debug(f"calculate_fetch_window called for {symbol} with start={requested_start}, end={requested_end}, output_format={output_format}")
 
-    print(f"DEBUG: {symbol} - last_timestamp={last_timestamp}, first_timestamp={first_timestamp}")  # Debug print
-    logger.debug(f"Symbol {symbol}: last_timestamp={last_timestamp}, first_timestamp={first_timestamp}, requested_start={requested_start}, requested_end={requested_end}")
+    # Get existing data timestamps based on output format
+    if output_format == "postgres" and postgres_storage is not None:
+        # First check if any data exists for this symbol
+        try:
+            with postgres_storage.engine.connect() as conn:
+                exists_result = conn.execute(text(f"""
+                    SELECT COUNT(*) as count
+                    FROM ohlcv_data
+                    WHERE symbol = :symbol AND interval = :interval
+                """), {"symbol": symbol, "interval": interval}).fetchone()
+
+                if not exists_result or exists_result.count == 0:
+                    logger.info(f"Symbol {symbol}: No existing data found in database, fetching full range")
+                    return requested_start, requested_end, True
+        except Exception as e:
+            logger.warning(f"Failed to check data existence for {symbol}: {e}")
+            # Fall back to timestamp check
+
+        last_timestamp = get_last_timestamp_from_db(symbol, interval, postgres_storage)
+        first_timestamp = get_first_timestamp_from_db(symbol, interval, postgres_storage)
+        logger.debug(f"Symbol {symbol}: Using database timestamps - first={first_timestamp}, last={last_timestamp}")
+    else:
+        last_timestamp = get_last_timestamp_from_csv(symbol, base_dir, interval)
+        first_timestamp = get_first_timestamp_from_csv(symbol, base_dir, interval)
+        logger.debug(f"Symbol {symbol}: Using CSV timestamps - first={first_timestamp}, last={last_timestamp}")
 
     if last_timestamp is None or first_timestamp is None:
         # No existing data, fetch full range
@@ -277,36 +400,35 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
 
     # Parse requested times
     try:
-        req_start_ts = pd.Timestamp(requested_start).replace(tzinfo=None)
+        req_start_ts = pd.Timestamp(requested_start, tz='UTC')
         if requested_end and requested_end.strip():  # Handle empty end_time as current time
-            req_end_ts = pd.Timestamp(requested_end).replace(tzinfo=None)
+            req_end_ts = pd.Timestamp(requested_end, tz='UTC')
         else:
-            req_end_ts = pd.Timestamp.now().replace(tzinfo=None)  # Empty end_time means "up to now"
+            req_end_ts = pd.Timestamp.now(tz='UTC')  # Empty end_time means "up to now"
     except Exception as e:
         logger.error(f"Failed to parse requested times: {e}")
         return requested_start, requested_end, True
 
-    # Ensure timestamps are tz-naive for comparison
-    first_timestamp = first_timestamp.replace(tzinfo=None)
-    last_timestamp = last_timestamp.replace(tzinfo=None)
+    # Ensure timestamps are tz-aware UTC for comparison
+    first_timestamp = first_timestamp.replace(tzinfo=timezone.utc) if first_timestamp.tzinfo is None else first_timestamp.astimezone(timezone.utc)
+    last_timestamp = last_timestamp.replace(tzinfo=timezone.utc) if last_timestamp.tzinfo is None else last_timestamp.astimezone(timezone.utc)
 
     # Get overlap configuration
     overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 15)
     overlap_delta = pd.Timedelta(minutes=overlap_minutes)
 
     # Get current time for recency check
-    current_time = pd.Timestamp.now().replace(tzinfo=None)
+    current_time = pd.Timestamp.now(tz='UTC')
 
     # If existing data already fully covers the requested range, skip fetching
     # Also skip if data is recent enough (within overlap_minutes of current time)
     data_is_recent = (current_time - last_timestamp) <= overlap_delta
     time_diff_minutes = (current_time - last_timestamp).total_seconds() / 60
-    print(f"DEBUG: {symbol} - current_time={current_time}, time_diff_minutes={time_diff_minutes:.2f}, overlap_delta_minutes={overlap_minutes}, data_is_recent={data_is_recent}")  # Debug print
     logger.debug(f"Symbol {symbol}: current_time={current_time}, last_timestamp={last_timestamp}, time_diff={time_diff_minutes:.1f} minutes, overlap_delta={overlap_delta}, data_is_recent={data_is_recent}")
+
     if (first_timestamp <= req_start_ts and last_timestamp >= req_end_ts) or data_is_recent:
-        print(f"DEBUG: {symbol} - SKIPPING FETCH: data_is_recent={data_is_recent}")  # Debug print
         logger.info(f"Symbol {symbol}: Existing data fully covers requested range or is recent enough, skipping fetch")
-        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}, data_is_recent={data_is_recent}, current_time={current_time}, last_timestamp={last_timestamp}, time_diff={time_diff_minutes:.1f} minutes, overlap_delta={overlap_delta}")
+        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}, data_is_recent={data_is_recent}")
         return requested_start, requested_end, False
 
     # Determine if we need to fetch earlier data
@@ -378,12 +500,100 @@ def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 1) -> boo
 
         max_gap = diffs.max()
         if max_gap > expected_interval * 2:  # Allow some tolerance
-            logger.warning(f"Data gap detected: max gap {max_gap} > expected {expected_interval}")
+            gap_count = (diffs > expected_interval * 2).sum()
+            logger.warning(f"Found {gap_count} gaps larger than {expected_interval * 2} in data continuity check")
+            return False
+
+        # Check for duplicate timestamps
+        duplicate_count = timestamps.duplicated().sum()
+        if duplicate_count > 0:
+            logger.warning(f"Found {duplicate_count} duplicate timestamps in data")
+            return False
+
+        # Check for reasonable data density (should not have too many missing points)
+        total_expected_points = int((timestamps.max() - timestamps.min()).total_seconds() / (interval_minutes * 60)) + 1
+        actual_points = len(timestamps)
+        coverage_ratio = actual_points / total_expected_points
+
+        if coverage_ratio < 0.8:  # If coverage is below 80%, consider data incomplete
+            logger.warning(f"Data coverage too low: {coverage_ratio:.2%} ({actual_points}/{total_expected_points} points)")
             return False
 
         return True
     except Exception as e:
         logger.error(f"Error validating data continuity: {e}")
+        return False
+
+def validate_database_continuity(engine, table_name: str, symbol: str, interval_minutes: int = 1) -> bool:
+    """
+    Validate data continuity in database table by loading data into DataFrame and using unified validation.
+
+    Args:
+        engine: SQLAlchemy engine
+        table_name: Name of the table to check
+        symbol: Trading symbol
+        interval_minutes: Expected interval between timestamps
+
+    Returns:
+        True if data is continuous, False otherwise
+    """
+    try:
+        with engine.connect() as conn:
+            # First, check if data exists and get basic stats
+            stats_result = conn.execute(text(f"""
+                SELECT
+                    COUNT(*) as total_count,
+                    COUNT(DISTINCT timestamp) as unique_timestamps
+                FROM {table_name}
+                WHERE symbol = :symbol
+            """), {"symbol": symbol}).fetchone()
+
+            if not stats_result or stats_result.total_count < 2:
+                return True  # Empty or single record is considered valid
+
+            total_count = stats_result.total_count
+            unique_timestamps = stats_result.unique_timestamps
+
+            # Database-specific check: detect exact duplicates (same timestamp with different data)
+            if total_count > unique_timestamps:
+                dup_count = total_count - unique_timestamps
+                logger.warning(f"Found {dup_count} exact duplicate timestamps in database for {symbol}")
+                return False
+
+            # Load data into DataFrame for unified validation
+            df_result = conn.execute(text(f"""
+                SELECT timestamp, open_price, high_price, low_price, close_price, volume
+                FROM {table_name}
+                WHERE symbol = :symbol
+                ORDER BY timestamp
+            """), {"symbol": symbol})
+
+            # Convert to DataFrame
+            import pandas as pd
+            data = []
+            for row in df_result:
+                data.append({
+                    'timestamp': row[0],  # timestamp
+                    'open': row[1],      # open_price
+                    'high': row[2],      # high_price
+                    'low': row[3],       # low_price
+                    'close': row[4],     # close_price
+                    'volume': row[5]
+                })
+
+            if not data:
+                return True
+
+            df = pd.DataFrame(data)
+
+            # Ensure timestamp is datetime with UTC timezone
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+
+            # Use unified validation logic
+            return validate_data_continuity(df, interval_minutes)
+
+    except Exception as e:
+        logger.error(f"Error validating database continuity for {symbol}: {e}")
         return False
 
 def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
@@ -407,14 +617,52 @@ def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
     df.index.names = ['timestamp']
     return df.reset_index()
 
-def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False) -> bool:
+def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize kline data to ensure consistent format.
+    Currently just returns the dataframe as-is, but can be extended for data cleaning.
+    """
+    return df
+
+def timeframe_to_ms(timeframe: str) -> int:
+    """
+    Convert a timeframe string (e.g., '1m', '5m', '1h', '1d') to milliseconds.
+
+    Args:
+        timeframe: Timeframe string
+
+    Returns:
+        Duration in milliseconds
+    """
+    if timeframe.endswith('m'):
+        minutes = int(timeframe[:-1])
+        return minutes * 60 * 1000
+    elif timeframe.endswith('h'):
+        hours = int(timeframe[:-1])
+        return hours * 60 * 60 * 1000
+    elif timeframe.endswith('d'):
+        days = int(timeframe[:-1])
+        return days * 24 * 60 * 60 * 1000
+    else:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False, output_format: str = None, postgres_storage: PostgreSQLStorage = None) -> bool:
 	"""
-	Save buffered klines for a symbol to a Parquet file.
+	Save buffered klines for a symbol to CSV or PostgreSQL.
 	- If `entries` is provided, save those rows directly.
 	- Otherwise use module-level `klines[symbol]` buffer (existing behavior).
 	- Clears the buffer only when buffer was used.
 	- If append_only=True, assumes data can be safely appended without checking for duplicates
+	- output_format: "csv" or "postgres" (uses global config if None)
+	- postgres_storage: PostgreSQLStorage instance (uses global config if None)
 	"""
+	global _global_output_format, _global_postgres_storage
+
+	# Use global config if not provided
+	if output_format is None:
+		output_format = _global_output_format
+	if postgres_storage is None:
+		postgres_storage = _global_postgres_storage
 	global klines
 	if klines is None:
 		klines = {}
@@ -431,47 +679,73 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 	# entries should be a list of dicts; accept DataFrame-like too in future
 	df = pd.DataFrame(entries)
 	# Convert timestamp to readable datetime string if not already datetime
-	if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-		df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-	
+	# Always ensure timestamp is timezone-aware UTC datetime
+	df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+	# Make timestamp timezone-aware (UTC) - remove existing timezone if present, then localize to UTC
+	if df['timestamp'].dt.tz is not None:
+		df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
+	else:
+		df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+
 	# Normalize the data
 	df = normalize_klines(df)
-	
-	symbol_safe = symbol.replace("/", "_")
-	dirpath = os.path.join(base_dir, symbol_safe)
-	os.makedirs(dirpath, exist_ok=True)
+
 	# Get interval from data, default to TIMEFRAME if not found
 	interval = df['interval'].iloc[0] if not df.empty and 'interval' in df.columns else TIMEFRAME
-	filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
 
-	# If append_only mode and file exists, try to append new data
-	if append_only and os.path.exists(filepath):
+	if output_format == "postgres":
+		# Save to PostgreSQL
+		if postgres_storage is None:
+			logger.error("PostgreSQL storage not provided for postgres output format")
+			return False
+
 		try:
-			# Check if new data timestamps are all after existing data's last timestamp
-			existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir, interval)
-			if existing_last_ts is not None:
-				new_min_ts = df['timestamp'].min()
-				if new_min_ts > existing_last_ts:
-					# Safe to append - convert to CSV format and append
-					csv_content = df.to_csv(index=False, header=False)
-					with open(filepath, 'a', newline='') as f:
-						f.write(csv_content)
-					logger.debug(f"Appended {len(df)} new rows to {filepath} (append_only mode)")
-					# Clear buffer after saving only if we used the module buffer
-					if use_buffer:
-						klines[symbol] = []
-					return True
+			success = postgres_storage.save_ohlcv_data(df, symbol, interval)
+			if success:
+				logger.debug(f"Saved {len(df)} rows to PostgreSQL for {symbol} {interval}")
+				# Clear buffer after saving only if we used the module buffer
+				if use_buffer:
+					klines[symbol] = []
+			return success
 		except Exception as e:
-			logger.warning(f"Failed to append data for {symbol}, falling back to full rewrite: {e}")
+			logger.error(f"Failed to save {symbol} {interval} to PostgreSQL: {e}")
+			return False
 
-	# Fallback to full rewrite
-	df.to_csv(filepath, index=False)
-	logger.debug(f"Saved {len(df)} rows to {filepath}")
+	else:
+		# Original CSV saving logic
+		symbol_safe = symbol.replace("/", "_")
+		dirpath = os.path.join(base_dir, symbol_safe)
+		os.makedirs(dirpath, exist_ok=True)
+		filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
 
-	# Clear buffer after saving only if we used the module buffer
-	if use_buffer:
-		klines[symbol] = []
-	return True
+		# If append_only mode and file exists, try to append new data
+		if append_only and os.path.exists(filepath):
+			try:
+				# Check if new data timestamps are all after existing data's last timestamp
+				existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir, interval)
+				if existing_last_ts is not None:
+					new_min_ts = df['timestamp'].min()
+					if new_min_ts > existing_last_ts:
+						# Safe to append - convert to CSV format and append
+						csv_content = df.to_csv(index=False, header=False)
+						with open(filepath, 'a', newline='') as f:
+							f.write(csv_content)
+						logger.debug(f"Appended {len(df)} new rows to {filepath} (append_only mode)")
+						# Clear buffer after saving only if we used the module buffer
+						if use_buffer:
+							klines[symbol] = []
+						return True
+			except Exception as e:
+				logger.warning(f"Failed to append data for {symbol}, falling back to full rewrite: {e}")
+
+		# Fallback to full rewrite
+		df.to_csv(filepath, index=False)
+		logger.debug(f"Saved {len(df)} rows to {filepath}")
+
+		# Clear buffer after saving only if we used the module buffer
+		if use_buffer:
+			klines[symbol] = []
+		return True
 
 # Get symbols path from config
 SYMBOLS_PATH = config.get("data", {}).get("symbols", "config/top50_symbols.json")
@@ -486,7 +760,7 @@ def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
         logger.error(f"Failed to load symbols: {e}")
         return []
 
-def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None) -> Dict[str, pd.DataFrame]:
+def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None, output_format: str = "csv", postgres_storage: PostgreSQLStorage = None) -> Dict[str, pd.DataFrame]:
     """
     Fetch latest 1m candles for specified symbols via REST API within the given time range.
 
@@ -507,7 +781,9 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
         class DefaultArgs:
             def __init__(self):
                 self.start_time = config.get("data_collection", {}).get("start_time", "2025-01-01T00:00:00Z")
-                self.end_time = config.get("data_collection", {}).get("end_time", pd.Timestamp.now().strftime("%Y-%m-%dT%H:%M:%SZ"))
+                # Get current time in UTC and format as UTC
+                current_utc = pd.Timestamp.now(tz='UTC')
+                self.end_time = config.get("data_collection", {}).get("end_time", current_utc.strftime("%Y-%m-%dT%H:%M:%SZ"))
                 self.limit = config.get("data_collection", {}).get("limit", 100)
         args = DefaultArgs()
 
@@ -520,19 +796,29 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
     # Handle invalid end_time
     try:
-        end_ts = int(pd.Timestamp(end_time).timestamp() * 1000)
+        # Parse end_time as UTC if it has timezone info, otherwise assume UTC
+        if 'Z' in end_time or '+' in end_time or end_time.endswith(('T00:00:00', 'T23:59:59')):
+            end_ts = int(pd.Timestamp(end_time).timestamp() * 1000)
+        else:
+            # Assume date-only or local time strings are in UTC
+            end_ts = int(pd.Timestamp(end_time, tz='UTC').timestamp() * 1000)
     except Exception as e:
-        logger.warning(f"Invalid end_time '{end_time}', using current time")
-        end_time_obj = pd.Timestamp.now()
+        logger.warning(f"Invalid end_time '{end_time}', using current UTC time")
+        end_time_obj = pd.Timestamp.now(tz='UTC')
         end_time = end_time_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_ts = int(end_time_obj.timestamp() * 1000)
 
     # Handle invalid start_time
     try:
-        start_ts = int(pd.Timestamp(start_time).timestamp() * 1000)
+        # Parse start_time as UTC if it has timezone info, otherwise assume UTC
+        if 'Z' in start_time or '+' in start_time or start_time.endswith(('T00:00:00', 'T23:59:59')):
+            start_ts = int(pd.Timestamp(start_time).timestamp() * 1000)
+        else:
+            # Assume date-only or local time strings are in UTC
+            start_ts = int(pd.Timestamp(start_time, tz='UTC').timestamp() * 1000)
     except Exception as e:
         logger.warning(f"Invalid start_time '{start_time}', using end_time - 30 days")
-        start_time_obj = pd.Timestamp(end_time) - pd.Timedelta(days=30)
+        start_time_obj = pd.Timestamp(end_time, tz='UTC') - pd.Timedelta(days=30)
         start_time = start_time_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
         start_ts = int(start_time_obj.timestamp() * 1000)
 
@@ -540,13 +826,79 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
     enable_incremental = config.get("data_collection", {}).get("enable_incremental", True)
     print(f"DEBUG: enable_incremental = {enable_incremental}")  # Debug print
 
+    # Initialize CCXT exchange once for all symbols
+    exchange = ccxt.okx({
+        'options': {
+            'defaultType': 'swap',  # Use perpetual swaps
+        },
+    })
+
+    # Load markets once to ensure symbol mapping for all symbols
+    exchange.load_markets()
+
     for symbol in symbols:
         try:
+            # 数据完整性验证：在下载前检查现有数据
+            logger.info(f"Validating existing data integrity for {symbol}...")
+            data_integrity_ok = True
+
+            if output_format == "postgres" and postgres_storage is not None:
+                # 检查数据库中的数据完整性
+                if not validate_database_continuity(postgres_storage.engine, "ohlcv_data", symbol, interval_minutes=15 if TIMEFRAME == '15m' else 1):
+                    logger.warning(f"Database data continuity validation failed for {symbol}")
+                    data_integrity_ok = False
+                else:
+                    logger.info(f"Database data integrity OK for {symbol}")
+
+            else:
+                # 检查CSV文件中的数据完整性
+                existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
+                if existing_df is not None and not existing_df.empty:
+                    # 验证数据连续性
+                    if not validate_data_continuity(existing_df, interval_minutes=15 if TIMEFRAME == '15m' else 1):
+                        logger.warning(f"Data continuity validation failed for {symbol} in CSV files")
+                        data_integrity_ok = False
+                    else:
+                        logger.info(f"CSV data integrity OK for {symbol}: {len(existing_df)} points")
+                else:
+                    logger.info(f"No existing CSV data for {symbol}")
+
+            # 如果数据完整性检查失败，清空现有数据
+            if not data_integrity_ok:
+                logger.warning(f"Data integrity check failed for {symbol}, clearing existing data before fresh download")
+                try:
+                    if output_format == "postgres" and postgres_storage is not None:
+                        # 从数据库中删除现有数据
+                        delete_query = text("""
+                        DELETE FROM ohlcv_data
+                        WHERE symbol = :symbol AND interval = :interval
+                        """)
+                        with postgres_storage.engine.connect() as conn:
+                            delete_result = conn.execute(delete_query, {"symbol": symbol, "interval": TIMEFRAME})
+                            conn.commit()
+                        logger.info(f"Cleared {delete_result.rowcount} existing records for {symbol} from database")
+                    else:
+                        # 删除CSV文件
+                        import os
+                        symbol_safe = symbol.replace("/", "_")
+                        dirpath = os.path.join(output_dir, symbol_safe)
+                        filepath = os.path.join(dirpath, f"{symbol_safe}_{TIMEFRAME}.csv")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                            logger.info(f"Removed existing CSV file for {symbol}: {filepath}")
+                        # 也删除目录如果为空
+                        if os.path.exists(dirpath) and not os.listdir(dirpath):
+                            os.rmdir(dirpath)
+                            logger.info(f"Removed empty directory for {symbol}: {dirpath}")
+                except Exception as e:
+                    logger.error(f"Failed to clear existing data for {symbol}: {e}")
+                    # 继续处理，但记录错误
+
             # Calculate fetch window for this symbol if incremental is enabled
             if enable_incremental:
                 print(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
-                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, TIMEFRAME)
-                print(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}")  # Debug print
+                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, TIMEFRAME, output_format, postgres_storage)
+                print(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}, adjusted_start={adjusted_start}, adjusted_end={adjusted_end}")  # Debug print
                 if not should_fetch:
                     logger.info(f"Skipping {symbol} - no new data needed")
                     continue
@@ -557,9 +909,23 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 symbol_end_time = end_time
 
             # Convert symbol-specific times to timestamps
+            # 如果endtime为空或接近当前时间，在开始获取数据时重新计算为当前时间
+            current_time = pd.Timestamp.now(tz='UTC')
+            if not symbol_end_time or symbol_end_time.strip() == '' or pd.Timestamp(symbol_end_time, tz='UTC') >= current_time:
+                symbol_end_time = current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                logger.debug(f"Recalculated end_time to current time for {symbol}: {symbol_end_time}")
+            
             try:
-                symbol_start_ts = int(pd.Timestamp(symbol_start_time).timestamp() * 1000)
-                symbol_end_ts = int(pd.Timestamp(symbol_end_time).timestamp() * 1000)
+                # Parse as UTC if timezone info present, otherwise assume UTC
+                if 'Z' in symbol_start_time or '+' in symbol_start_time:
+                    symbol_start_ts = int(pd.Timestamp(symbol_start_time).timestamp() * 1000)
+                else:
+                    symbol_start_ts = int(pd.Timestamp(symbol_start_time, tz='UTC').timestamp() * 1000)
+                
+                if 'Z' in symbol_end_time or '+' in symbol_end_time:
+                    symbol_end_ts = int(pd.Timestamp(symbol_end_time).timestamp() * 1000)
+                else:
+                    symbol_end_ts = int(pd.Timestamp(symbol_end_time, tz='UTC').timestamp() * 1000)
             except Exception as e:
                 logger.error(f"Failed to parse adjusted times for {symbol}: {e}")
                 raise  # Exit on time parsing error
@@ -567,23 +933,22 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             all_candles = []
             current_since = symbol_start_ts  # Start from adjusted start_time
             request_count = 0
+            max_requests = 1000  # Safety limit to prevent infinite loops
+            consecutive_empty_responses = 0
+            max_empty_responses = 3  # Stop after 3 consecutive empty responses
 
             logger.info(f"Fetching data for {symbol} from {symbol_start_time} to {symbol_end_time}")
 
-            # Initialize CCXT exchange
-            exchange = ccxt.okx({
-                'options': {
-                    'defaultType': 'swap',  # Use perpetual swaps
-                },
-            })
-
-            # Load markets to ensure symbol mapping
-            exchange.load_markets()
-
-            while True:
+            while request_count < max_requests:
                 request_count += 1
 
-                logger.debug(f"Request {request_count} for {symbol}: since={current_since}, collected={len(all_candles)} candles")
+                # Convert directly from milliseconds to a pandas Timestamp object (UTC)
+                pd_timestamp = pd.to_datetime(current_since, unit='ms', utc=True)
+
+                # The pandas Timestamp object is already readable, but you can also format it
+                readable_string = pd_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+                logger.debug(f"Request {request_count} for {symbol}: since={current_since}/{readable_string}, collected={len(all_candles)} candles")
 
                 try:
                     # Use CCXT to fetch OHLCV data
@@ -595,10 +960,23 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     )
 
                     if not ohlcv:
-                        logger.info(f"No more data available for {symbol} after {request_count} requests, collected {len(all_candles)} candles")
-                        break
+                        consecutive_empty_responses += 1
+                        logger.debug(f"Empty response {consecutive_empty_responses}/{max_empty_responses} for {symbol}")
+                        if consecutive_empty_responses >= max_empty_responses:
+                            logger.info(f"Stopping data collection for {symbol}: {consecutive_empty_responses} consecutive empty responses")
+                            break
+                        # Continue to next request with incremented timestamp
+                        current_since += timeframe_to_ms(TIMEFRAME)  # Skip this empty timeframe slot
+                        continue
+                    else:
+                        consecutive_empty_responses = 0  # Reset counter on successful response
 
-                    logger.debug(f"Received {len(ohlcv)} candles for {symbol}, timestamp range: {ohlcv[0][0]} to {ohlcv[-1][0]}")
+                    pd_timestamp = pd.to_datetime(current_since, unit='ms', utc=True)
+
+                    # The pandas Timestamp object is already readable, but you can also format it
+                    readable_string = pd_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+                    logger.debug(f"Received {len(ohlcv)} candles for {symbol}, timestamp range: {ohlcv[0][0]} to {ohlcv[-1][0]}, {readable_string} to {symbol_end_time}")
 
                     # Check if we're getting the same data repeatedly (API limitation)
                     if request_count > 1 and ohlcv:
@@ -668,6 +1046,11 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     logger.error(f"Unexpected error for {symbol}: {e}")
                     break
 
+            # Check if we hit the maximum request limit
+            if request_count >= max_requests:
+                logger.warning(f"Reached maximum request limit ({max_requests}) for {symbol}, collected {len(all_candles)} candles")
+                break
+
             if all_candles:
                 df = pd.DataFrame(all_candles)
                 # Sort by timestamp ascending
@@ -675,38 +1058,100 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
                 # If incremental, merge with existing data
                 if enable_incremental:
-                    existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
-                    if existing_df is not None and not existing_df.empty:
-                        # Ensure both dataframes have datetime timestamps
-                        existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], errors='coerce')
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-                        # Merge and deduplicate
-                        combined_df = pd.concat([existing_df, df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
-                        # Drop any rows with invalid timestamps
-                        combined_df = combined_df.dropna(subset=['timestamp'])
-                        # Validate data continuity
-                        if not validate_data_continuity(combined_df):
-                            logger.warning(f"Data continuity validation failed for {symbol} after merge")
+                    # Load existing data based on output format
+                    if output_format == "postgres" and postgres_storage is not None:
+                        # Load existing data from PostgreSQL database
+                        try:
+                            with postgres_storage.engine.connect() as conn:
+                                existing_result = conn.execute(text("""
+                                    SELECT timestamp, open_price, high_price, low_price, close_price, volume
+                                    FROM ohlcv_data
+                                    WHERE symbol = :symbol AND interval = :interval
+                                    ORDER BY timestamp
+                                """), {"symbol": symbol, "interval": TIMEFRAME})
 
-                        # Check if we actually added new data
-                        original_count = len(existing_df)
-                        new_count = len(combined_df)
-                        if new_count > original_count:
-                            df = combined_df
-                            # Check if new data can be safely appended (all new timestamps > existing max)
-                            existing_max_ts = existing_df['timestamp'].max()
-                            new_min_ts = df['timestamp'].min()
-                            can_append = new_min_ts > existing_max_ts
-                            logger.info(f"Merged {original_count} existing + {len(all_candles)} new = {new_count} total candles for {symbol}")
-                            result[symbol] = df
-                            # Save with append mode if safe
-                            save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'), append_only=can_append)
-                            if can_append:
-                                logger.debug(f"Used append mode for {symbol} (safe to append)")
-                            continue  # Skip the general save below since we already saved
+                                existing_data = []
+                                for row in existing_result:
+                                    existing_data.append({
+                                        'timestamp': row[0],  # timestamp (already datetime)
+                                        'open': row[1],
+                                        'high': row[2],
+                                        'low': row[3],
+                                        'close': row[4],
+                                        'volume': row[5]
+                                    })
+
+                                if existing_data:
+                                    existing_df = pd.DataFrame(existing_data)
+                                    logger.debug(f"Loaded {len(existing_df)} existing records from database for {symbol}")
+                                else:
+                                    existing_df = None
+                        except Exception as e:
+                            logger.warning(f"Failed to load existing data from database for {symbol}: {e}")
+                            existing_df = None
+                    else:
+                        # Load existing data from CSV files
+                        existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
+                    
+                    if existing_df is not None and not existing_df.empty:
+                        if output_format == "postgres":
+                            # For PostgreSQL, don't merge - just save new data that doesn't exist
+                            # Get the maximum timestamp from existing data
+                            existing_max_ts = pd.to_datetime(existing_df['timestamp'], errors='coerce', utc=True).dt.tz_localize(None).max()
+
+                            # Filter new data to only include timestamps newer than existing max
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                            new_data_filtered = df[df['timestamp'] > existing_max_ts]
+
+                            if not new_data_filtered.empty:
+                                # Save only the new data (PostgreSQL handles conflicts)
+                                added_count = len(new_data_filtered)
+                                logger.info(f"Adding {added_count} new candles for {symbol} to PostgreSQL (after {existing_max_ts})")
+                                df = new_data_filtered
+                                result[symbol] = df
+                                # Save new data only
+                                save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'), append_only=False)
+                            else:
+                                # No new data to add
+                                logger.info(f"No new data to add for {symbol} (all {len(df)} candles already exist in PostgreSQL)")
+                                result[symbol] = existing_df
+                                continue  # Skip the general save below since no new data to save
                         else:
-                            logger.info(f"No new data added for {symbol} (all {len(all_candles)} candles were duplicates), skipping save")
-                            continue  # Skip saving if no new data was added
+                            # For CSV, merge existing and new data
+                            # Ensure both dataframes have datetime timestamps (timezone-naive for consistency)
+                            existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], errors='coerce', utc=True).dt.tz_localize(None)
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+
+                            # Get the maximum timestamp from existing data
+                            existing_max_ts = existing_df['timestamp'].max()
+
+                            # Filter new data to only include timestamps newer than existing max
+                            new_data_filtered = df[df['timestamp'] > existing_max_ts]
+
+                            if not new_data_filtered.empty:
+                                # Append only the new data that doesn't already exist
+                                combined_df = pd.concat([existing_df, new_data_filtered]).sort_values('timestamp').reset_index(drop=True)
+                                # Drop any rows with invalid timestamps
+                                combined_df = combined_df.dropna(subset=['timestamp'])
+                                # Validate data continuity
+                                if not validate_data_continuity(combined_df):
+                                    logger.warning(f"Data continuity validation failed for {symbol} after merge")
+
+                                # Check if we actually added new data
+                                original_count = len(existing_df)
+                                new_count = len(combined_df)
+                                added_count = len(new_data_filtered)
+                                logger.info(f"Merged {original_count} existing + {added_count} new = {new_count} total candles for {symbol}")
+                                df = combined_df
+                                result[symbol] = df
+                                # Save with append mode since we're only adding new data
+                                save_klines(symbol, base_dir=output_dir, entries=df.to_dict(orient='records'), append_only=True)
+                            else:
+                                # No new data to add
+                                logger.info(f"No new data to add for {symbol} (all {len(df)} candles already exist)")
+                                df = existing_df
+                                result[symbol] = df
+                                continue  # Skip the general save below since no new data to save
                     else:
                         logger.info(f"No existing data for {symbol}, saving {len(all_candles)} new candles")
 
@@ -750,6 +1195,58 @@ async def main(args):
     print("DEBUG: main function called")  # Debug print
     logger.info("Starting OKX data collector")
 
+    # Configure CCXT logging based on command line argument
+    verbose_ccxt = getattr(args, 'verbose_ccxt', False)
+    configure_ccxt_logging(verbose=verbose_ccxt)
+    if verbose_ccxt:
+        logger.info("CCXT verbose logging enabled")
+    else:
+        logger.info("CCXT logging set to WARNING level (use --verbose-ccxt to enable debug logs)")
+
+    # Get output format from config, with command line override
+    config_output = config.get("data_collection", {}).get("output", "csv")
+    output_format = args.output if args.output is not None else config_output
+
+    # Validate output format
+    if output_format not in ["csv", "db"]:
+        logger.error(f"Invalid output format '{output_format}'. Must be 'csv' or 'db'")
+        return
+
+    # Map 'db' to 'postgres' for backward compatibility
+    if output_format == "db":
+        output_format = "postgres"
+
+    # Initialize PostgreSQL storage if needed
+    postgres_storage = None
+    if output_format == "postgres":
+        try:
+            if hasattr(args, 'db_env') and args.db_env:
+                logger.info("Initializing PostgreSQL storage from environment variables")
+                postgres_config = PostgresConfig.from_env()
+            else:
+                logger.info("Initializing PostgreSQL storage from workflow.json")
+                db_config = config.get("database", {})
+                postgres_config = PostgresConfig(
+                    host=db_config.get("host", "localhost"),
+                    database=db_config.get("database", "qlib_crypto"),
+                    user=db_config.get("user", "crypto_user"),
+                    password=db_config.get("password", "change_me_in_production"),
+                    port=db_config.get("port", 5432)
+                )
+
+            postgres_storage = PostgreSQLStorage.from_config(postgres_config)
+
+            # Test connection
+            postgres_storage.health_check()
+            logger.info("PostgreSQL storage initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize PostgreSQL storage: {e}")
+            return
+
+    # Set global output configuration
+    set_global_output_config(output_format, postgres_storage)
+
     symbols = load_symbols()
     if not symbols:
         logger.error("No symbols loaded, exiting")
@@ -758,7 +1255,7 @@ async def main(args):
     logger.info(f"Collecting data for {len(symbols)} symbols: {symbols[:5]}...")
 
     # Update the latest data with the provided arguments
-    update_latest_data(symbols, output_dir="data/klines", args=args)
+    update_latest_data(symbols, output_dir="data/klines", args=args, output_format=output_format, postgres_storage=postgres_storage)
 
     # Create exchange instance: resolve ccxtpro/ccxt dynamically so tests can inject shims via sys.modules.
     exchange = None
@@ -847,7 +1344,13 @@ async def main(args):
                 while not stop_evt.is_set():
                     try:
                         # Run the (sync) update_latest_data in a thread to avoid blocking the event loop
-                        await asyncio.to_thread(update_latest_data, symbols_list)
+                        # Add timeout protection to prevent hanging on API calls
+                        await asyncio.wait_for(
+                            asyncio.to_thread(update_latest_data, symbols_list, "data/klines", args, output_format, postgres_storage),
+                            timeout=300.0  # 5 minute timeout for the entire update operation
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error("Polling update timed out after 5 minutes")
                     except Exception as e:
                         logger.error("Polling update failed: %s", e)
                     # wait for either stop event or timeout
@@ -934,11 +1437,41 @@ async def main(args):
         interval = 60
     ws_heartbeat = asyncio.create_task(_heartbeat_forever(interval))
 
-    # Subscribe to OHLCV data
+    # Set up signal handling for graceful shutdown in websocket mode
+    stop_event = asyncio.Event()
+
+    def _signal_handler():
+        if not stop_event.is_set():
+            logger.info("Received stop signal, shutting down websocket collector...")
+            stop_event.set()
+
+    # Register signal handlers (best-effort; may not work on Windows)
+    try:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _signal_handler)
+            except (NotImplementedError, RuntimeError):
+                # some platforms (Windows) or test runners may not support add_signal_handler
+                pass
+    except RuntimeError:
+        # no running loop; ignore
+        pass
+
+    # Subscribe to OHLCV data with timeout protection
+    subscription_timeout = 30.0  # 30 seconds to subscribe to all symbols
     try:
         for symbol in symbols:
             try:
-                await exchange.watch_ohlcv(symbol, TIMEFRAME, handle_ohlcv)
+                logger.info(f"Subscribing to OHLCV data for {symbol}")
+                await asyncio.wait_for(
+                    exchange.watch_ohlcv(symbol, TIMEFRAME, handle_ohlcv),
+                    timeout=10.0  # 10 second timeout per symbol
+                )
+                logger.debug(f"Successfully subscribed to OHLCV for {symbol}")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout subscribing to OHLCV for {symbol} after 10 seconds")
+                raise
             except Exception as e:
                 # Convert ccxt NotSupported (or similar) into a clear RuntimeError
                 if type(e).__name__ == "NotSupported" or "watchOHLCV" in str(e) or "watch_ohlcv" in str(e):
@@ -946,27 +1479,43 @@ async def main(args):
                         "Exchange does not support watch_ohlcv at runtime. "
                         "Use ccxtpro.okx (supports websockets) or a test shim that provides websocket methods."
                     ) from e
+                logger.error(f"Failed to subscribe to OHLCV for {symbol}: {e}")
                 raise
+
         for symbol in symbols:
             try:
-                await exchange.watch_funding_rate(symbol, handle_funding_rate)
+                logger.info(f"Subscribing to funding rate data for {symbol}")
+                await asyncio.wait_for(
+                    exchange.watch_funding_rate(symbol, handle_funding_rate),
+                    timeout=10.0  # 10 second timeout per symbol
+                )
+                logger.debug(f"Successfully subscribed to funding rate for {symbol}")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout subscribing to funding rate for {symbol} after 10 seconds")
+                raise
             except Exception as e:
                 if type(e).__name__ == "NotSupported" or "watchFundingRate" in str(e) or "watch_funding_rate" in str(e):
                     raise RuntimeError(
                         "Exchange does not support watch_funding_rate at runtime. "
                         "Use ccxtpro.okx (supports websockets) or a test shim that provides websocket methods."
                     ) from e
+                logger.error(f"Failed to subscribe to funding rate for {symbol}: {e}")
                 raise
 
-        # Keep running - original loop (now heartbeat runs in background)
+        # Keep running - wait for stop signal or KeyboardInterrupt
         try:
-            while True:
+            while not stop_event.is_set():
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
-            logger.info("Shutting down collector")
+            logger.info("Shutting down collector (KeyboardInterrupt)")
+        finally:
+            logger.info("Shutting down websocket collector")
             # Save any remaining data
-            for symbol in klines:
-                save_klines(symbol)
+            for symbol in list(klines.keys()):
+                try:
+                    save_klines(symbol)
+                except Exception:
+                    logger.exception("Failed to save klines for %s during shutdown", symbol)
     finally:
         # cancel websocket heartbeat, then attempt graceful close
         if not ws_heartbeat.done():
@@ -1020,6 +1569,23 @@ parser.add_argument(
     type=int,
     default=config.get("data_collection", {}).get("limit", 100),
     help="Number of data points to fetch per request"
+)
+parser.add_argument(
+    "--output",
+    type=str,
+    choices=["csv", "db"],
+    default=None,
+    help="Output format: csv or db (default from config)"
+)
+parser.add_argument(
+    "--db-env",
+    action="store_true",
+    help="Use environment variables for PostgreSQL config (overrides workflow.json)"
+)
+parser.add_argument(
+    "--verbose-ccxt",
+    action="store_true",
+    help="Enable verbose CCXT library logging (shows API requests/responses)"
 )
 
 if __name__ == '__main__':
