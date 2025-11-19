@@ -624,27 +624,24 @@ def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
     """
     return df
 
-def timeframe_to_ms(timeframe: str) -> int:
+def get_interval_minutes(timeframe: str) -> int:
     """
-    Convert a timeframe string (e.g., '1m', '5m', '1h', '1d') to milliseconds.
-
+    Get the interval in minutes for a given timeframe.
+    
     Args:
-        timeframe: Timeframe string
-
+        timeframe: Timeframe string like '1m', '15m', '1h', '1d'
+        
     Returns:
-        Duration in milliseconds
+        Interval in minutes
     """
     if timeframe.endswith('m'):
-        minutes = int(timeframe[:-1])
-        return minutes * 60 * 1000
+        return int(timeframe[:-1])
     elif timeframe.endswith('h'):
-        hours = int(timeframe[:-1])
-        return hours * 60 * 60 * 1000
+        return int(timeframe[:-1]) * 60
     elif timeframe.endswith('d'):
-        days = int(timeframe[:-1])
-        return days * 24 * 60 * 60 * 1000
+        return int(timeframe[:-1]) * 24 * 60
     else:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
+        return 1  # default
 
 def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False, output_format: str = None, postgres_storage: PostgreSQLStorage = None) -> bool:
 	"""
@@ -844,7 +841,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
             if output_format == "postgres" and postgres_storage is not None:
                 # 检查数据库中的数据完整性
-                if not validate_database_continuity(postgres_storage.engine, "ohlcv_data", symbol, interval_minutes=15 if TIMEFRAME == '15m' else 1):
+                if not validate_database_continuity(postgres_storage.engine, "ohlcv_data", symbol, interval_minutes=get_interval_minutes(TIMEFRAME)):
                     logger.warning(f"Database data continuity validation failed for {symbol}")
                     data_integrity_ok = False
                 else:
@@ -855,7 +852,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
                 if existing_df is not None and not existing_df.empty:
                     # 验证数据连续性
-                    if not validate_data_continuity(existing_df, interval_minutes=15 if TIMEFRAME == '15m' else 1):
+                    if not validate_data_continuity(existing_df, interval_minutes=get_interval_minutes(TIMEFRAME)):
                         logger.warning(f"Data continuity validation failed for {symbol} in CSV files")
                         data_integrity_ok = False
                     else:

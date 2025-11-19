@@ -45,6 +45,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def convert_ccxt_to_qlib_freq(freq: str) -> str:
+    """Convert CCXT frequency format to QLib frequency format.
+    
+    Args:
+        freq: CCXT frequency string (e.g., '1h', '15m', '1d')
+        
+    Returns:
+        QLib frequency string (e.g., '1hour', '15min', '1day')
+    """
+    # CCXT to qlib frequency mapping
+    freq_mapping = {
+        '1m': '1min',
+        '3m': '3min', 
+        '5m': '5min',
+        '15m': '15min',
+        '30m': '30min',
+        '1h': '60min',
+        '2h': '120min',
+        '4h': '240min',
+        '6h': '360min',
+        '8h': '480min',
+        '12h': '720min',
+        '1d': '1440min',
+        '3d': '4320min',
+        '1w': '10080min',
+        '1M': '43200min'
+    }
+    
+    # If already in pandas format, return as-is
+    if freq in freq_mapping.values():
+        return freq
+        
+    # Convert from CCXT format
+    if freq in freq_mapping:
+        return freq_mapping[freq]
+    
+    # If not found in mapping, assume it's already in correct format
+    logger.warning(f"Unknown frequency format '{freq}', using as-is")
+    return freq
+
 def get_ann_scaler(freq: str) -> int:
     """Calculate annualization scaler based on frequency for cryptocurrency markets."""
     

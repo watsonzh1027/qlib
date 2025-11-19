@@ -69,10 +69,10 @@ def test_data_integrity_workflow():
         CREATE TABLE ohlcv_data (
             symbol TEXT,
             timestamp TIMESTAMP,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
+            open_price REAL,
+            high_price REAL,
+            low_price REAL,
+            close_price REAL,
             volume REAL,
             interval TEXT
         )
@@ -81,15 +81,15 @@ def test_data_integrity_workflow():
         # Insert corrupted data (with gaps)
         for _, row in corrupted_df.iterrows():
             conn.execute(text("""
-            INSERT INTO ohlcv_data (symbol, timestamp, open, high, low, close, volume, interval)
-            VALUES (:symbol, :timestamp, :open, :high, :low, :close, :volume, :interval)
+            INSERT INTO ohlcv_data (symbol, timestamp, open_price, high_price, low_price, close_price, volume, interval)
+            VALUES (:symbol, :timestamp, :open_price, :high_price, :low_price, :close_price, :volume, :interval)
             """), {
                 'symbol': 'BTC/USDT',
                 'timestamp': row['timestamp'].to_pydatetime(),  # Convert to datetime
-                'open': row['open'],
-                'high': row['high'],
-                'low': row['low'],
-                'close': row['close'],
+                'open_price': row['open'],
+                'high_price': row['high'],
+                'low_price': row['low'],
+                'close_price': row['close'],
                 'volume': row['volume'],
                 'interval': '1m'
             })
@@ -105,21 +105,19 @@ def test_data_integrity_workflow():
         conn.execute(text("DELETE FROM ohlcv_data WHERE symbol = 'BTC/USDT'"))
         for _, row in good_df.iterrows():
             conn.execute(text("""
-            INSERT INTO ohlcv_data (symbol, timestamp, open, high, low, close, volume, interval)
-            VALUES (:symbol, :timestamp, :open, :high, :low, :close, :volume, :interval)
+            INSERT INTO ohlcv_data (symbol, timestamp, open_price, high_price, low_price, close_price, volume, interval)
+            VALUES (:symbol, :timestamp, :open_price, :high_price, :low_price, :close_price, :volume, :interval)
             """), {
                 'symbol': 'BTC/USDT',
                 'timestamp': row['timestamp'].to_pydatetime(),  # Convert to datetime
-                'open': row['open'],
-                'high': row['high'],
-                'low': row['low'],
-                'close': row['close'],
+                'open_price': row['open'],
+                'high_price': row['high'],
+                'low_price': row['low'],
+                'close_price': row['close'],
                 'volume': row['volume'],
                 'interval': '1m'
             })
-        conn.commit()
-
-    # Test good database data
+        conn.commit()    # Test good database data
     db_valid_good = validate_database_continuity(engine, "ohlcv_data", "BTC/USDT", interval_minutes=1)
     assert db_valid_good, "Good database data should pass validation"
     print("✓ Good database data passes validation")

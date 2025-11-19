@@ -23,6 +23,7 @@ class PostgresConfig:
     user: str
     password: str
     port: int = 5432
+    ssl_mode: str = "require"
 
     # Connection pool settings
     pool_size: int = 10
@@ -178,7 +179,7 @@ class PostgresConfig:
             data = json.load(f)
 
         # Extract nested config if present
-        config_data = data.get('postgres', data)
+        config_data = data.get('postgres', data.get('database', data))
 
         # Handle retention_days conversion (JSON doesn't support int keys)
         retention_days = {}
@@ -398,7 +399,6 @@ def setup_database_schema(config: PostgresConfig, drop_existing: bool = False) -
             # Create main table with partitioning
             create_table_sql = """
             CREATE TABLE IF NOT EXISTS ohlcv_data (
-                id SERIAL PRIMARY KEY,
                 symbol VARCHAR(20) NOT NULL,
                 interval VARCHAR(10) NOT NULL,
                 timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -413,7 +413,7 @@ def setup_database_schema(config: PostgresConfig, drop_existing: bool = False) -
                 taker_buy_quote_volume DECIMAL(20,8),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE(symbol, interval, timestamp)
+                PRIMARY KEY (symbol, interval, timestamp)
             ) PARTITION BY LIST (interval);
             """
             conn.execute(text(create_table_sql))
@@ -430,8 +430,7 @@ def setup_database_schema(config: PostgresConfig, drop_existing: bool = False) -
                 # Create interval partition
                 create_partition_sql = f"""
                 CREATE TABLE IF NOT EXISTS {partition_name}
-                PARTITION OF ohlcv_data FOR VALUES IN ('{interval}')
-                PARTITION BY RANGE (timestamp);
+                PARTITION OF ohlcv_data FOR VALUES IN ('{interval}');
                 """
                 conn.execute(text(create_partition_sql))
                 logger.info(f"Created partition: {partition_name}")
