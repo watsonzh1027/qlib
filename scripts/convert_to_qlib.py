@@ -323,6 +323,10 @@ class PostgreSQLStorage:
 class DumpDataCrypto(DumpDataAll):
     """Custom dumper for crypto data that skips calendar creation since crypto markets are 24/7."""
     
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.all_data = {}  # Will be set externally
+    
     def get_symbol_from_file(self, file_path: Path) -> str:
         """Convert file path to symbol, handling crypto naming conventions."""
         # file_path.stem is like 'BTC_USDT', we need to convert to 'BTCUSDT'
@@ -406,19 +410,65 @@ class DumpDataCrypto(DumpDataAll):
             data_array.astype("<f").tofile(str(bin_path))
     
     def dump(self):
-        self._get_all_date()
-        # For crypto, create a calendar file with all collected timestamps
-        self._dump_calendars_crypto()
-        self._dump_instruments()
+        # For crypto, if we have all_data from database, use it for calendar and instruments creation
+        if hasattr(self, 'all_data') and self.all_data:
+            self._dump_calendars_crypto()
+            self._dump_instruments_crypto()
+        else:
+            self._get_all_date()
+            self._dump_calendars_crypto()
+        
         self._dump_features()
+    
+    def _dump_instruments_crypto(self):
+        """Create instruments file for crypto data using all_data."""
+        logger.info("start dump instruments for crypto......")
+        date_range_list = []
+        
+        for symbol, df in self.all_data.items():
+            if not df.empty and self.date_field_name in df.columns:
+                timestamps = pd.to_datetime(df[self.date_field_name])
+                begin_time = self._format_datetime(timestamps.min())
+                end_time = self._format_datetime(timestamps.max())
+                # Use symbol without slashes to match folder names
+                symbol_clean = symbol.replace('/', '').upper()
+                inst_fields = [symbol_clean, begin_time, end_time]
+                date_range_list.append(f"{self.INSTRUMENTS_SEP.join(inst_fields)}")
+        
+        self.save_instruments(date_range_list)
+        logger.info("end of instruments dump.\n")
     
     def _dump_calendars_crypto(self):
         """Create calendar file for crypto data using all collected timestamps."""
         logger.info("start dump calendars for crypto......")
-        # Use the collected timestamps from _get_all_date
-        if self._kwargs["all_datetime_set"]:
+        
+        # First try to use all_data if available (from database conversion)
+        if hasattr(self, 'all_data') and self.all_data:
+            all_timestamps = set()
+            total_records = 0
+            
+            for symbol, df in self.all_data.items():
+                if not df.empty and self.date_field_name in df.columns:
+                    timestamps = pd.to_datetime(df[self.date_field_name])
+                    unique_timestamps = timestamps.drop_duplicates()
+                    all_timestamps.update(unique_timestamps)
+                    total_records += len(unique_timestamps)
+                    logger.info(f"{symbol}: {len(unique_timestamps)} unique timestamps")
+            
+            logger.info(f"Total unique timestamps collected: {len(all_timestamps)}")
+            
+            if all_timestamps:
+                self._calendars_list = sorted(all_timestamps)
+                self.save_calendars(self._calendars_list)
+                logger.info(f"Created calendar with {len(self._calendars_list)} timestamps from all_data")
+                logger.info("end of calendars dump.\n")
+                return
+        
+        # Fallback to original method using _get_all_date results
+        if self._kwargs.get("all_datetime_set"):
             self._calendars_list = sorted(map(pd.Timestamp, self._kwargs["all_datetime_set"]))
             self.save_calendars(self._calendars_list)
+            logger.info(f"Created calendar with {len(self._calendars_list)} timestamps from _get_all_date")
         else:
             logger.warning("No datetime data found for calendar creation")
         logger.info("end of calendars dump.\n")
@@ -634,6 +684,8 @@ def convert_to_qlib(source: str = None):
             include_fields=','.join(include_fields),
             max_workers=4
         )
+        # Pass all_data for calendar creation
+        dumper.all_data = all_data
         dumper.dump()
         end_time_convert = time.time()
         

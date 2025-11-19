@@ -178,7 +178,7 @@ if [ -z "$BRANCH_NUMBER" ]; then
     BRANCH_NUMBER=$(check_existing_features "$BRANCH_SUFFIX")
 fi
 
-FEATURE_NUM=$(printf "%03d" "$BRANCH_NUMBER")
+FEATURE_NUM=$(printf "%04d" "$BRANCH_NUMBER")
 BRANCH_NAME="${FEATURE_NUM}-${BRANCH_SUFFIX}"
 
 # GitHub enforces a 244-byte limit on branch names
