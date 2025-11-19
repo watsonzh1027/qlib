@@ -162,8 +162,8 @@ class PostgreSQLStorage:
                 column_mapping = {v: k for k, v in self.schema.items()}
                 df = df.rename(columns=column_mapping)
 
-                # Ensure timestamp is datetime
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                # Ensure timestamp is datetime, handling timezone-aware timestamps
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
 
                 logger.info(f"Retrieved {len(df)} records for {symbol} {interval}")
                 return df

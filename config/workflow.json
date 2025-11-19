@@ -8,7 +8,7 @@
   "data_collection": {
     "interval": "1h",
     "api_timeout": 10,
-    "start_time": "2024-11-01",
+    "start_time": "2018-01-01",
     "end_time": "",
     "limit": 1000,
     "overlap_minutes": 5,

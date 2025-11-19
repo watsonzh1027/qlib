@@ -97,6 +97,166 @@ def configure_ccxt_logging(verbose: bool = False):
 configure_ccxt_logging(verbose=False)
 
 
+def validate_trading_pair_availability(symbol: str, requested_start: str, requested_end: str, exchange=None) -> dict:
+    """
+    Check if trading pair has data available for the requested time range.
+
+    Args:
+        symbol: Trading pair symbol (e.g., 'BTC/USDT')
+        requested_start: Requested start time string
+        requested_end: Requested end time string
+        exchange: CCXT exchange instance (will create if None)
+
+    Returns:
+        dict with validation results:
+        {
+            'available': bool,
+            'earliest_available': str or None,
+            'latest_available': str or None,
+            'requested_range_valid': bool,
+            'suggested_start': str or None,
+            'reason': str
+        }
+    """
+    if exchange is None:
+        exchange = ccxt.okx()
+
+    result = {
+        'available': False,
+        'earliest_available': None,
+        'latest_available': None,
+        'requested_range_valid': False,
+        'suggested_start': None,
+        'reason': 'Unknown'
+    }
+
+    try:
+        # Load markets if not already loaded
+        if not hasattr(exchange, 'markets') or exchange.markets is None:
+            exchange.load_markets()
+
+        # Check if symbol exists in exchange
+        if symbol not in exchange.markets:
+            result['reason'] = f"Symbol {symbol} not found in exchange markets"
+            return result
+
+        # Try to find earliest available data by probing different time periods
+        timeframe = '1d'  # Use daily data for availability check
+        test_dates = [
+            pd.Timestamp('2020-01-01'),
+            pd.Timestamp('2021-01-01'),
+            pd.Timestamp('2022-01-01'),
+            pd.Timestamp('2023-01-01'),
+            pd.Timestamp.now() - pd.DateOffset(days=30)
+        ]
+
+        earliest_found = None
+        latest_found = None
+
+        for test_date in test_dates:
+            try:
+                since = int(test_date.timestamp() * 1000)
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1)
+
+                if ohlcv and len(ohlcv) > 0:
+                    timestamp = pd.to_datetime(ohlcv[0][0], unit='ms', utc=True)
+                    if earliest_found is None or timestamp < earliest_found:
+                        earliest_found = timestamp
+                    if latest_found is None or timestamp > latest_found:
+                        latest_found = timestamp
+            except Exception as e:
+                # Continue to next date if this one fails
+                continue
+
+        if earliest_found is not None:
+            result['available'] = True
+            result['earliest_available'] = earliest_found.strftime("%Y-%m-%dT%H:%M:%SZ")
+            result['latest_available'] = latest_found.strftime("%Y-%m-%dT%H:%M:%SZ") if latest_found else None
+
+            # Check if requested range is valid
+            req_start_ts = pd.Timestamp(requested_start, tz='UTC')
+            req_end_ts = pd.Timestamp(requested_end, tz='UTC')
+
+            if req_start_ts >= earliest_found:
+                result['requested_range_valid'] = True
+                result['reason'] = 'Requested range is within available data'
+            else:
+                result['requested_range_valid'] = False
+                result['suggested_start'] = result['earliest_available']
+                result['reason'] = f'Requested start {requested_start} is before earliest available data {result["earliest_available"]}'
+        else:
+            result['reason'] = f'No historical data found for {symbol} in tested time ranges'
+
+    except Exception as e:
+        result['reason'] = f'Error checking availability: {str(e)}'
+
+    return result
+
+
+def handle_empty_responses(symbol: str, consecutive_empty: int, current_timestamp: int, exchange=None) -> str:
+    """
+    Analyze empty response patterns and provide specific error messages.
+
+    Args:
+        symbol: Trading pair symbol
+        consecutive_empty: Number of consecutive empty responses
+        current_timestamp: Current request timestamp (ms)
+        exchange: CCXT exchange instance
+
+    Returns:
+        Action to take: 'continue', 'adjust_range', 'stop'
+    """
+    current_time = pd.to_datetime(current_timestamp, unit='ms', utc=True)
+
+    # If we have 3+ consecutive empty responses, analyze the situation
+    if consecutive_empty >= 3:
+        # Check if this is likely a data availability issue vs API issue
+        if current_time < pd.Timestamp('2021-01-01', tz='UTC'):
+            return 'stop'  # Likely the token didn't exist yet
+
+        # Check if we're requesting very old data
+        days_old = (pd.Timestamp.now(tz='UTC') - current_time).days
+        if days_old > 365 * 2:  # More than 2 years old
+            logger.warning(f"{symbol}: {consecutive_empty} consecutive empty responses for {days_old} days old data. "
+                         f"This may indicate the trading pair didn't exist at {current_time.strftime('%Y-%m-%d')}.")
+            return 'stop'
+
+        # For more recent data, it might be a temporary API issue
+        if days_old < 30:
+            logger.warning(f"{symbol}: {consecutive_empty} consecutive empty responses for recent data. "
+                         f"This may be a temporary API issue.")
+            return 'continue'  # Keep trying for recent data
+
+    return 'continue'
+
+
+def adjust_time_range_if_needed(symbol: str, requested_start: str, requested_end: str, availability_info: dict) -> tuple:
+    """
+    Automatically adjust time range to available data if requested range is invalid.
+
+    Args:
+        symbol: Trading pair symbol
+        requested_start: Original requested start time
+        requested_end: Original requested end time
+        availability_info: Result from validate_trading_pair_availability
+
+    Returns:
+        tuple: (adjusted_start, adjusted_end)
+    """
+    if availability_info.get('requested_range_valid', True):
+        # Range is valid, no adjustment needed
+        return requested_start, requested_end
+
+    if availability_info.get('suggested_start'):
+        adjusted_start = availability_info['suggested_start']
+        logger.info(f"{symbol}: Automatically adjusted start time from {requested_start} to {adjusted_start} "
+                   f"(earliest available data)")
+        return adjusted_start, requested_end
+
+    # If no suggestion available, return original range
+    return requested_start, requested_end
+
+
 # Global storage
 klines = {}
 funding_rates = {}
@@ -420,27 +580,55 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     # Get current time for recency check
     current_time = pd.Timestamp.now(tz='UTC')
 
-    # If existing data already fully covers the requested range, skip fetching
-    # Also skip if data is recent enough (within overlap_minutes of current time)
-    data_is_recent = (current_time - last_timestamp) <= overlap_delta
-    time_diff_minutes = (current_time - last_timestamp).total_seconds() / 60
-    logger.debug(f"Symbol {symbol}: current_time={current_time}, last_timestamp={last_timestamp}, time_diff={time_diff_minutes:.1f} minutes, overlap_delta={overlap_delta}, data_is_recent={data_is_recent}")
+    # Calculate data freshness based on interval
+    # Data needs update if the gap exceeds the interval duration
+    interval_minutes = get_interval_minutes(interval)
+    interval_timedelta = pd.Timedelta(minutes=interval_minutes)
 
-    if (first_timestamp <= req_start_ts and last_timestamp >= req_end_ts) or data_is_recent:
-        logger.info(f"Symbol {symbol}: Existing data fully covers requested range or is recent enough, skipping fetch")
-        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}, data_is_recent={data_is_recent}")
+    # Check if data needs update based on gaps
+    # Only update start if requested start is after existing data (gap in middle) or if no data exists
+    # Don't try to fetch data earlier than what we already have in the database
+    needs_update_start = req_start_ts > first_timestamp and (req_start_ts - first_timestamp) > interval_timedelta
+    needs_update_end = req_end_ts > last_timestamp and (req_end_ts - last_timestamp) > interval_timedelta
+
+    # If the gap between requested start and first available data is too large (>30 days),
+    # assume the exchange doesn't have data that early and don't try to fetch it
+    max_gap_days = 30
+    if needs_update_start and (first_timestamp - req_start_ts).days > max_gap_days:
+        logger.info(f"Symbol {symbol}: Gap between requested start {req_start_ts} and first available data {first_timestamp} is too large ({(first_timestamp - req_start_ts).days} days > {max_gap_days} days), assuming exchange doesn't have earlier data")
+        needs_update_start = False
+
+    logger.debug(f"Symbol {symbol}: interval={interval}, interval_minutes={interval_minutes}, needs_update_start={needs_update_start}, needs_update_end={needs_update_end}")
+
+    # Skip fetching if existing data fully covers the requested range and no updates needed
+    if first_timestamp <= req_start_ts and last_timestamp >= req_end_ts and not needs_update_start and not needs_update_end:
+        logger.info(f"Symbol {symbol}: Existing data fully covers requested range and is up-to-date, skipping fetch")
+        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}")
+        return requested_start, requested_end, False
+
+    # Skip fetching if requested end time is before or at the last available data and no earlier data is needed
+    if req_end_ts <= last_timestamp and not needs_update_start and not needs_update_end:
+        logger.info(f"Symbol {symbol}: Requested end time {req_end_ts} is before or at last available data {last_timestamp}, and no earlier data needed, skipping fetch")
         return requested_start, requested_end, False
 
     # Determine if we need to fetch earlier data
     need_earlier = req_start_ts < first_timestamp
 
-    # Adjust start time: if we need earlier data, start from requested start; otherwise, start from last_timestamp - overlap
-    if need_earlier:
+    # Adjust start time based on what data is missing
+    if need_earlier and needs_update_start:
+        # Need to fetch earlier historical data
         adjusted_start = req_start_ts
+        logger.info(f"Symbol {symbol}: Need earlier historical data, fetching from {adjusted_start.isoformat()}")
+    elif needs_update_end:
+        # Need to fetch newer data
+        adjusted_start = last_timestamp - interval_timedelta  # Small overlap
+        logger.info(f"Symbol {symbol}: Need newer data, updating from {adjusted_start.isoformat()}")
     else:
-        adjusted_start = last_timestamp - overlap_delta
+        # No significant gaps, just update recent data
+        adjusted_start = last_timestamp - interval_timedelta
+        logger.info(f"Symbol {symbol}: Updating recent data from {adjusted_start.isoformat()}")
 
-    logger.info(f"Symbol {symbol}: Adjusting fetch window from {requested_start} to {adjusted_start.isoformat()}")
+    logger.info(f"Symbol {symbol}: Final fetch window: {adjusted_start.isoformat()} to {requested_end}")
     return adjusted_start.isoformat(), requested_end, True
 
 def load_existing_data(symbol: str, base_dir: str = "data/klines", interval: str = "1m") -> pd.DataFrame | None:
@@ -642,6 +830,25 @@ def get_interval_minutes(timeframe: str) -> int:
         return int(timeframe[:-1]) * 24 * 60
     else:
         return 1  # default
+
+def timeframe_to_ms(timeframe: str) -> int:
+    """
+    Convert timeframe string to milliseconds.
+    
+    Args:
+        timeframe: Timeframe string like '1m', '15m', '1h', '1d'
+        
+    Returns:
+        Interval in milliseconds
+    """
+    if timeframe.endswith('m'):
+        return int(timeframe[:-1]) * 60 * 1000
+    elif timeframe.endswith('h'):
+        return int(timeframe[:-1]) * 60 * 60 * 1000
+    elif timeframe.endswith('d'):
+        return int(timeframe[:-1]) * 24 * 60 * 60 * 1000
+    else:
+        return 60 * 1000  # default 1 minute
 
 def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None = None, append_only: bool = False, output_format: str = None, postgres_storage: PostgreSQLStorage = None) -> bool:
 	"""
@@ -891,6 +1098,27 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     logger.error(f"Failed to clear existing data for {symbol}: {e}")
                     # 继续处理，但记录错误
 
+            # 智能时间范围验证：在开始数据收集前检查交易对的历史可用性
+            logger.info(f"Validating time range availability for {symbol}...")
+            availability_info = validate_trading_pair_availability(symbol, start_time, end_time, exchange)
+
+            if not availability_info['available']:
+                logger.warning(f"{symbol}: Trading pair not available on exchange. Reason: {availability_info['reason']}")
+                logger.info(f"Skipping {symbol} - trading pair not available")
+                continue
+
+            if not availability_info['requested_range_valid']:
+                # 自动调整时间范围到可用数据
+                original_start = start_time
+                start_time, end_time = adjust_time_range_if_needed(symbol, start_time, end_time, availability_info)
+                if start_time != original_start:
+                    logger.info(f"{symbol}: Time range automatically adjusted to available data range")
+                else:
+                    logger.warning(f"{symbol}: Requested time range {original_start} to {end_time} is not available. "
+                                 f"Earliest available: {availability_info.get('earliest_available', 'Unknown')}")
+                    logger.info(f"Skipping {symbol} - requested time range not available")
+                    continue
+
             # Calculate fetch window for this symbol if incremental is enabled
             if enable_incremental:
                 print(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
@@ -959,11 +1187,29 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     if not ohlcv:
                         consecutive_empty_responses += 1
                         logger.debug(f"Empty response {consecutive_empty_responses}/{max_empty_responses} for {symbol}")
-                        if consecutive_empty_responses >= max_empty_responses:
-                            logger.info(f"Stopping data collection for {symbol}: {consecutive_empty_responses} consecutive empty responses")
+
+                        # 使用增强的错误处理逻辑
+                        action = handle_empty_responses(symbol, consecutive_empty_responses, current_since, exchange)
+                        if action == 'stop':
+                            logger.warning(f"No candles found for {symbol} in the specified time range. "
+                                         f"This may indicate the trading pair didn't exist at the requested time, "
+                                         f"or there was an issue with the exchange API.")
                             break
+                        elif action == 'adjust_range':
+                            # 尝试调整时间范围（未来扩展）
+                            logger.info(f"Attempting to adjust time range for {symbol} due to empty responses")
+                            break
+                        # action == 'continue' - 继续下一轮请求
+
                         # Continue to next request with incremented timestamp
                         current_since += timeframe_to_ms(TIMEFRAME)  # Skip this empty timeframe slot
+                        
+                        # Ensure we don't request data from the future even after empty response handling
+                        current_time_ms = int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)
+                        if current_since > current_time_ms:
+                            logger.info(f"Reached current time for {symbol} after empty response, stopping data collection")
+                            break
+                        
                         continue
                     else:
                         consecutive_empty_responses = 0  # Reset counter on successful response
@@ -1016,9 +1262,11 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     all_candles.extend(processed_candles)
                     logger.debug(f"Processed {len(processed_candles)} candles within time range for {symbol}, total collected: {len(all_candles)}")
 
-                    # If we got fewer candles than requested or went past end time, we're done
-                    if len(ohlcv) < min(args.limit, 300) or any(int(candle[0]) > end_ts for candle in ohlcv):
-                        logger.info(f"Stopping data collection for {symbol}: got {len(ohlcv)} candles (limit: {min(args.limit, 300)}), collected {len(all_candles)} total")
+                    # If we got fewer candles than requested from API or went past end time, we're done
+                    # Note: We check the raw API response size, not the filtered size
+                    # Only stop if API returned 0 candles (no more data) or if the earliest candle is past end time
+                    if len(ohlcv) == 0 or (len(ohlcv) > 0 and int(ohlcv[0][0]) > symbol_end_ts):
+                        logger.info(f"Stopping data collection for {symbol}: API returned {len(ohlcv)} candles, collected {len(all_candles)} total")
                         break
 
                     # Check if we have valid latest timestamp to continue pagination
@@ -1028,6 +1276,12 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
                     # Continue with the latest timestamp we got (go further forward in time)
                     current_since = int(latest_ts) + 1  # Add 1ms to avoid overlap
+
+                    # Ensure we don't request data from the future
+                    current_time_ms = int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)
+                    if current_since > current_time_ms:
+                        logger.info(f"Reached current time for {symbol}, stopping data collection at {len(all_candles)} candles")
+                        break
 
                     # Progress logging every 10 requests
                     if request_count % 10 == 0:
