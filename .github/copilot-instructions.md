@@ -94,3 +94,10 @@ When suggesting code changes:
 - Refer to `scripts/sample_backtest.py` for an example of running a backtest.
 - Check `tests/` for examples of unit and integration tests.
 
+
+## Active Technologies
+- Python 3.x (existing project) + Qlib, pandas, numpy, PostgreSQL (0006-multi-portfolio-dataset-split)
+- PostgreSQL database for OHLCV data (0006-multi-portfolio-dataset-split)
+
+## Recent Changes
+- 0006-multi-portfolio-dataset-split: Added Python 3.x (existing project) + Qlib, pandas, numpy, PostgreSQL
