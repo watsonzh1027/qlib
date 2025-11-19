@@ -19,7 +19,7 @@ As a data scientist working with cryptocurrency trading data, I want to configur
 
 1. **Given** a workflow.json with `"segments": {"train": 7, "valid": 2, "test": 1}`, **When** the dataset is initialized, **Then** each symbol's available data is automatically split into 70% for training, 20% for validation, and 10% for testing based on its own data range.
 2. **Given** symbols with different start dates (e.g., BTC from 2018, AAVE from 2020), **When** using proportion-based splits, **Then** each symbol uses its full available data range for the proportional split, ensuring no symbol is disadvantaged by fixed date boundaries.
-3. **Given** a symbol with insufficient data for the requested proportions, **When** the dataset is created, **Then** the system gracefully handles the split by using available data and logs appropriate warnings.
+3. **Given** a symbol with insufficient data for the requested proportions, **When** the dataset is created, **Then** the system uses the maximum available data for that symbol, applies proportional splits to the available range, and logs a warning message indicating reduced split quality for that symbol.
 
 ---
 
