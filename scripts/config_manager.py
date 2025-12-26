@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timedelta
 import os
 import re
+from typing import List
+from scripts.symbol_utils import normalize_symbol, normalize_symbols_list
 
 class ConfigManager:
     def __init__(self, config_path="config/workflow.json"):
@@ -156,7 +158,12 @@ class ConfigManager:
         Args:
             instruments (list): List of instrument symbols (e.g., ["BTC/USDT"])
         """
-        self._custom_instruments = instruments
+        # Normalize any provided custom instruments
+        if instruments is None:
+            self._custom_instruments = None
+        else:
+            # Normalize provided custom instruments using shared helper
+            self._custom_instruments = normalize_symbols_list(instruments)
 
     def get_crypto_symbols(self):
         """
@@ -175,10 +182,24 @@ class ConfigManager:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             symbols_file = os.path.join(project_root, symbols_file)
 
+        def normalize_symbol(sym: str) -> str:
+            s = str(sym).strip().upper()
+            s = s.replace('-', '/').replace('_', '/').replace(' ', '/')
+            if '/' in s:
+                return s
+            known_quotes = ['USDT', 'USDC', 'BUSD', 'USD', 'BTC', 'ETH', 'BNB']
+            for q in known_quotes:
+                if s.endswith(q) and len(s) > len(q):
+                    base = s[:-len(q)]
+                    return f"{base}/{q}"
+            return s
+
         try:
             with open(symbols_file, "r") as f:
                 data = json.load(f)
-                return data.get("symbols", [])
+                raw_symbols = data.get("symbols", [])
+                # Normalize all symbols to canonical CCXT format (e.g. 'BTC/USDT')
+                return normalize_symbols_list(raw_symbols) if 'normalize_symbols_list' in globals() else [normalize_symbol(sym) for sym in raw_symbols]
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"Warning: Could not load symbols from {symbols_file}: {e}")
             return []

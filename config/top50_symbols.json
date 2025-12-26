@@ -1,31 +1,12 @@
 {
   "symbols": [
-    "BTC/USDT",
-    "ETH/USDT",
-    "XRP/USDT",
-    "BNB/USDT",
-    "SOL/USDT",
-    "USDC/USDT",
-    "TRX/USDT",
-    "DOGE/USDT",
-    "ADA/USDT",
-    "HYPE/USDT",
-    "LINK/USDT",
-    "BCH/USDT",
-    "XLM/USDT",
-    "SUI/USDT",
-    "HBAR/USDT",
-    "AVAX/USDT",
-    "LTC/USDT",
-    "SHIB/USDT",
-    "TON/USDT",
-    "CRO/USDT",
-    "DOT/USDT",
-    "TAO/USDT",
-    "UNI/USDT",
-    "WLFI/USDT",
-    "AAVE/USDT"
+    "BTCUSDT",
+    "ETHUSDT",
+    "XRPUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "AAVEUSDT"
   ],
   "updated_at": "2025-11-05T08:20:06.476034+00:00",
-  "count": 25
+  "count": 6
 }

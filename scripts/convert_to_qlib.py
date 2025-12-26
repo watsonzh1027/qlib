@@ -24,6 +24,37 @@ from scripts.config_manager import ConfigManager
 from scripts.dump_bin import DumpDataAll  # Import DumpDataAll for binary conversion
 
 
+def calculate_proportion_segments(start_date, end_date, proportions):
+    """
+    Calculate date segments from proportions.
+    
+    Args:
+        start_date: Start date (string or datetime)
+        end_date: End date (string or datetime) 
+        proportions: Dict of segment names to proportion integers
+        
+    Returns:
+        Dict of segment names to (start_date, end_date) tuples
+    """
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    total = sum(proportions.values())
+    
+    current = start_ts
+    result = {}
+    
+    for seg, prop in proportions.items():
+        if prop <= 0:
+            raise ValueError(f"Proportion for segment '{seg}' must be positive")
+        
+        duration = (end_ts - start_ts) * prop / total
+        end_seg = current + duration
+        result[seg] = (str(current.date()), str(end_seg.date()))
+        current = end_seg
+    
+    return result
+
+
 class PostgreSQLStorage:
     """PostgreSQL database storage class for retrieving kline data."""
 
@@ -356,7 +387,7 @@ class DumpDataCrypto(DumpDataAll):
             if file_or_data.empty:
                 return
             raw_symbol = str(file_or_data.iloc[0][self.symbol_field_name])
-            code = fname_to_code(self._normalize_symbol(raw_symbol))
+            code = raw_symbol.upper()  # Keep original symbol format like "BTC/USDT"
             df = file_or_data
         elif isinstance(file_or_data, Path):
             code = self.get_symbol_from_file(file_or_data)
@@ -370,8 +401,8 @@ class DumpDataCrypto(DumpDataAll):
         # try to remove dup rows or it will cause exception when reindex.
         df = df.drop_duplicates(self.date_field_name)
 
-        # features save dir
-        features_dir = self._features_dir.joinpath(code_to_fname(code).lower())
+        # features save dir - match instrument naming convention
+        features_dir = self._features_dir.joinpath(code.upper().replace('/', ''))
         features_dir.mkdir(parents=True, exist_ok=True)
         
         # For crypto, save data directly without calendar alignment
@@ -383,12 +414,37 @@ class DumpDataCrypto(DumpDataAll):
             logger.warning(f"{features_dir.name} data is None or empty")
             return
         
-        # For crypto, no calendar alignment needed, use data directly
+        # For crypto, align data with calendar timestamps
         _df = df.copy()
         
         # Ensure timestamp is datetime and set as index
         _df[self.date_field_name] = pd.to_datetime(_df[self.date_field_name])
         _df = _df.set_index(self.date_field_name)
+        
+        # Check for excessive NaN values before processing
+        nan_ratio = _df.isnull().mean().mean()
+        logger.info(f"{features_dir.name}: NaN ratio = {nan_ratio:.3f}")
+        
+        if nan_ratio > 0.5:  # If more than 50% NaN, skip this symbol
+            logger.warning(f"{features_dir.name}: Too many NaN values ({nan_ratio:.3f}), skipping")
+            return
+        
+        # Fill NaN values with forward/backward fill, then interpolation, then 0
+        _df = _df.ffill().bfill().interpolate(method='linear').fillna(0)
+        
+        # Reindex to calendar timestamps to align with qlib expectations
+        # Load calendar
+        calendar_path = self._features_dir.parent / 'calendars' / f'{self.freq}.txt'
+        if calendar_path.exists():
+            with open(calendar_path, 'r') as f:
+                calendar_timestamps = [pd.Timestamp(line.strip()) for line in f.readlines()]
+            
+            # Convert data index to naive datetime (remove timezone) to match calendar
+            _df.index = _df.index.tz_localize(None)
+            
+            # Reindex data to calendar timestamps
+            _df = _df.reindex(calendar_timestamps, method='nearest')
+            logger.info(f"{features_dir.name}: Reindexed to {len(calendar_timestamps)} calendar timestamps, data shape: {_df.shape}")
         
         # Get dump fields (exclude timestamp as it's the index)
         dump_fields = self.get_dump_fields(_df.columns)
@@ -401,23 +457,19 @@ class DumpDataCrypto(DumpDataAll):
             # Get the start index for this data (use the index positions)
             start_index = 0  # Start from beginning since no calendar alignment
             
-            # Fill NaN values with 0 (or appropriate default)
-            field_data = _df[field].fillna(0).values
+            # Fill NaN values with forward/backward fill, then interpolation, then 0
+            field_data = _df[field].ffill().bfill().interpolate(method='linear').fillna(0).values
             
             # Save in qlib format: [start_index, values...]
             bin_path = features_dir.joinpath(f"{field}.{self.freq}.bin")
             data_array = np.concatenate([[start_index], field_data]).astype(np.float32)
             data_array.astype("<f").tofile(str(bin_path))
+            logger.info(f"Saved {field} to {bin_path}, size: {len(data_array)}")
     
     def dump(self):
-        # For crypto, if we have all_data from database, use it for calendar and instruments creation
-        if hasattr(self, 'all_data') and self.all_data:
-            self._dump_calendars_crypto()
-            self._dump_instruments_crypto()
-        else:
-            self._get_all_date()
-            self._dump_calendars_crypto()
-        
+        # For crypto, create a simple calendar since markets are 24/7
+        self._dump_calendars_crypto()
+        self._dump_instruments_crypto()
         self._dump_features()
     
     def _dump_instruments_crypto(self):
@@ -439,36 +491,26 @@ class DumpDataCrypto(DumpDataAll):
         logger.info("end of instruments dump.\n")
     
     def _dump_calendars_crypto(self):
-        """Create calendar file for crypto data using all collected timestamps."""
+        """Create calendar file for crypto data using date range."""
         logger.info("start dump calendars for crypto......")
         
-        # First try to use all_data if available (from database conversion)
-        if hasattr(self, 'all_data') and self.all_data:
-            all_timestamps = set()
-            total_records = 0
-            
-            for symbol, df in self.all_data.items():
-                if not df.empty and self.date_field_name in df.columns:
-                    timestamps = pd.to_datetime(df[self.date_field_name])
-                    unique_timestamps = timestamps.drop_duplicates()
-                    all_timestamps.update(unique_timestamps)
-                    total_records += len(unique_timestamps)
-                    logger.info(f"{symbol}: {len(unique_timestamps)} unique timestamps")
-            
-            logger.info(f"Total unique timestamps collected: {len(all_timestamps)}")
-            
-            if all_timestamps:
-                self._calendars_list = sorted(all_timestamps)
-                self.save_calendars(self._calendars_list)
-                logger.info(f"Created calendar with {len(self._calendars_list)} timestamps from all_data")
-                logger.info("end of calendars dump.\n")
-                return
+        # For crypto, create an hourly calendar since markets are 24/7
+        start_date = pd.Timestamp('2021-01-01')
+        end_date = pd.Timestamp('2025-12-31')
         
-        # Fallback to original method using _get_all_date results
+        # Create hourly date range for 60min frequency
+        date_range = pd.date_range(start=start_date, end=end_date, freq='H')
+        self._calendars_list = [d for d in date_range]
+        
+        self.save_calendars(self._calendars_list)
+        logger.info(f"Created hourly calendar with {len(self._calendars_list)} timestamps for crypto")
+        logger.info("end of calendars dump.\n")
         if self._kwargs.get("all_datetime_set"):
-            self._calendars_list = sorted(map(pd.Timestamp, self._kwargs["all_datetime_set"]))
+            datetime_set = set(map(pd.Timestamp, self._kwargs["all_datetime_set"]))
+            date_set = set(ts.date() for ts in datetime_set)
+            self._calendars_list = sorted(date_set)
             self.save_calendars(self._calendars_list)
-            logger.info(f"Created calendar with {len(self._calendars_list)} timestamps from _get_all_date")
+            logger.info(f"Created date calendar with {len(self._calendars_list)} dates from _get_all_date")
         else:
             logger.warning("No datetime data found for calendar creation")
         logger.info("end of calendars dump.\n")

@@ -19,7 +19,7 @@
     "host": "localhost",
     "database": "qlib_crypto",
     "user": "crypto_user",
-    "password": "change_me_in_production",
+    "password": "crypto",
     "port": 5432
   },
   "data_convertor": {
@@ -79,7 +79,9 @@
       "instruments": "<data.symbols>",
       "freq": "60min",
       "fit_start_time": "<workflow.start_time>",
-      "fit_end_time": "2025-08-01"
+      "fit_end_time": "",
+      "infer_processors": [],
+      "learn_processors": []
     }
   },
   "trading": {
@@ -95,9 +97,9 @@
     "kwargs": {
       "handler": "<data_handler_config>",
       "segments": {
-        "train": ["2024-01-01", "2024-06-01"],
-        "valid": ["2024-06-01", "2024-09-01"],
-        "test": ["2024-09-01", "2024-12-01"]
+        "train": 7,
+        "valid": 2,
+        "test": 1
       }
     },
     "dataset_validation": {

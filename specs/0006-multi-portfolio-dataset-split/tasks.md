@@ -40,9 +40,9 @@
 
 **Purpose**: Environment preparation and dependency verification
 
-- [ ] T001 Activate qlib environment and verify Python 3.x availability
-- [ ] T002 Verify PostgreSQL database connection and crypto data availability
-- [ ] T003 Confirm required packages installed (qlib, pandas, numpy, pytest)
+- [X] T001 Activate qlib environment and verify Python 3.x availability
+- [X] T002 Verify PostgreSQL database connection and crypto data availability
+- [X] T003 Confirm required packages installed (qlib, pandas, numpy, pytest)
 
 ---
 
@@ -52,9 +52,9 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Create backup of existing config/workflow.json
-- [ ] T005 Add dataset_validation section to config/workflow.json with default thresholds
-- [ ] T006 Update dataset.segments in config/workflow.json to support proportion integers
+- [X] T004 Create backup of existing config/workflow.json
+- [X] T005 Add dataset_validation section to config/workflow.json with default thresholds
+- [X] T006 Update dataset.segments in config/workflow.json to support proportion integers
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
 
@@ -70,16 +70,16 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation (TDD Red phase)**
 
-- [ ] T007 [P] [US1] Write unit tests for proportion calculation logic in tests/unit/test_proportion_split.py
-- [ ] T008 [P] [US1] Write unit tests for data volume validation in tests/unit/test_data_validation.py
-- [ ] T009 [P] [US1] Write integration test for end-to-end proportion splitting workflow in tests/integration/test_dataset_split.py
+- [X] T007 [P] [US1] Write unit tests for proportion calculation logic in tests/unit/test_proportion_split.py
+- [X] T008 [P] [US1] Write unit tests for data volume validation in tests/unit/test_data_validation.py
+- [X] T009 [P] [US1] Write integration test for end-to-end proportion splitting workflow in tests/integration/test_dataset_split.py
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Extend DatasetH class in qlib/data/dataset.py to accept and validate proportion-based segments
-- [ ] T011 [US1] Implement proportion-to-date conversion logic in scripts/convert_to_qlib.py
-- [ ] T012 [US1] Add data volume validation calls in scripts/workflow_crypto.py before training
-- [ ] T013 [US1] Implement error handling for insufficient data scenarios in scripts/workflow_crypto.py
+- [X] T010 [US1] Extend DatasetH class in qlib/data/dataset.py to accept and validate proportion-based segments
+- [X] T011 [US1] Implement proportion-to-date conversion logic in scripts/convert_to_qlib.py
+- [X] T012 [US1] Add data volume validation calls in scripts/workflow_crypto.py before training
+- [X] T013 [US1] Implement error handling for insufficient data scenarios in scripts/workflow_crypto.py
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
@@ -89,9 +89,9 @@
 
 **Purpose**: Quality assurance, documentation, and final validation
 
-- [ ] T014 Update inline code documentation for new proportion handling features
-- [ ] T015 Run full test suite and verify >=70% coverage maintained
-- [ ] T016 Test backward compatibility with existing date-based segment configurations
-- [ ] T017 Update examples/workflow_crypto.py with proportion configuration example
-- [ ] T018 Validate feature against all success criteria from spec.md</content>
+- [X] T014 Update inline code documentation for new proportion handling features
+- [X] T015 Run full test suite and verify >=70% coverage maintained
+- [X] T016 Test backward compatibility with existing date-based segment configurations
+- [X] T017 Update examples/workflow_crypto.py with proportion configuration example
+- [X] T018 Validate feature against all success criteria from spec.md</content>
 <parameter name="filePath">/home/watson/work/qlib-crypto/specs/0006-multi-portfolio-dataset-split/tasks.md

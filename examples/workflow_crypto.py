@@ -45,6 +45,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def validate_training_data(dataset, min_samples, warning_samples):
+    """
+    Validate training data volume against thresholds.
+    
+    Args:
+        dataset: Qlib Dataset instance
+        min_samples: Minimum required samples
+        warning_samples: Warning threshold samples
+        
+    Raises:
+        ValueError: If samples below minimum or invalid thresholds
+    """
+    if min_samples < 0 or warning_samples < 0 or min_samples > warning_samples:
+        raise ValueError("Invalid threshold values: min_samples and warning_samples must be non-negative, and min_samples <= warning_samples")
+    
+    try:
+        train_data = dataset.prepare('train')
+        if hasattr(train_data, 'shape'):
+            samples = train_data.shape[0]
+        else:
+            samples = len(train_data)
+        
+        logger.info(f"Train data shape: {train_data.shape}")
+        
+        if samples < min_samples:
+            raise ValueError(f"Training dataset contains {samples} samples, minimum required is {min_samples}")
+        elif samples < warning_samples:
+            logger.warning(f"Training dataset contains {samples} samples, recommended minimum is {warning_samples}")
+        else:
+            logger.info(f"Training data validation passed: {samples} samples available")
+    except Exception as e:
+        logger.error(f"Failed to validate training data: {e}")
+        raise
+
+
 def convert_ccxt_to_qlib_freq(freq: str) -> str:
     """Convert CCXT frequency format to QLib frequency format.
     
@@ -178,9 +214,29 @@ def train_single_crypto_model(config_manager, symbol, qlib):
     # Set custom instruments to only this symbol
     config_manager.set_custom_instruments([symbol])
     
-    # Load dataset for this symbol
+    # Load dataset for this symbol - data handler will be fitted automatically
     dataset_config = config_manager.get_dataset_config()
     dataset = init_instance_by_config(dataset_config)
+    
+    logger.info(f"Dataset segments: {dataset.segments}")
+    
+    # Validate training data volume
+    dataset_validation = dataset_config.get('dataset_validation', {'minimum_samples': 1000, 'warning_samples': 5000})
+    try:
+        train_data = dataset.prepare('train')
+        logger.info(f"Train data type: {type(train_data)}")
+        if hasattr(train_data, 'shape'):
+            logger.info(f"Train data shape: {train_data.shape}")
+        if hasattr(train_data, 'empty'):
+            logger.info(f"Train data empty: {train_data.empty}")
+        if hasattr(train_data, '__len__'):
+            logger.info(f"Train data length: {len(train_data)}")
+        if hasattr(train_data, 'columns'):
+            logger.info(f"Train data columns: {list(train_data.columns)}")
+    except Exception as e:
+        logger.error(f"Error inspecting train data: {e}")
+    
+    validate_training_data(dataset, dataset_validation['minimum_samples'], dataset_validation['warning_samples'])
     
     # Train model
     model_config_full = config_manager.get_model_config_full()
@@ -295,7 +351,7 @@ def main():
     try:
         # Data quality check
         logger.info("Performing data quality checks...")
-        if not check_data_quality():
+        if not check_data_quality(skip_calendar_check=True):
             logger.error("Data quality checks failed. Aborting workflow.")
             sys.exit(1)
         logger.info("Data quality checks passed.")

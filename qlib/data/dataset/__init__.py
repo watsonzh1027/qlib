@@ -119,7 +119,38 @@ class DatasetH(Dataset):
         self.handler: DataHandler = init_instance_by_config(handler, accept_types=DataHandler)
         self.segments = segments.copy()
         self.fetch_kwargs = copy(fetch_kwargs)
+        
+        # Convert proportion-based segments to date-based if needed
+        if self.segments and all(isinstance(v, int) for v in self.segments.values()):
+            self._convert_proportions_to_dates()
+        
         super().__init__(**kwargs)
+
+    def _convert_proportions_to_dates(self):
+        """Convert proportion integers to date tuples based on handler's time range."""
+        if not hasattr(self.handler, 'start_time') or not hasattr(self.handler, 'end_time'):
+            raise ValueError("Handler must have start_time and end_time to convert proportions")
+        
+        start_date = pd.Timestamp(self.handler.start_time)
+        end_date = pd.Timestamp(self.handler.end_time)
+        total_proportion = sum(self.segments.values())
+        
+        current_date = start_date
+        new_segments = {}
+        
+        for seg_name, proportion in self.segments.items():
+            if proportion <= 0:
+                raise ValueError(f"Proportion for segment '{seg_name}' must be positive")
+            
+            # Calculate duration for this segment
+            total_duration = end_date - start_date
+            segment_duration = total_duration * proportion / total_proportion
+            
+            segment_end = current_date + segment_duration
+            new_segments[seg_name] = (str(current_date.date()), str(segment_end.date()))
+            current_date = segment_end
+        
+        self.segments = new_segments
 
     def config(self, handler_kwargs: dict = None, **kwargs):
         """

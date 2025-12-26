@@ -18,8 +18,12 @@ sys.path.insert(0, str(project_root))
 
 from scripts.config_manager import ConfigManager
 
-def check_data_quality():
-    """Perform comprehensive data quality checks."""
+def check_data_quality(skip_calendar_check=False):
+    """Perform comprehensive data quality checks.
+    
+    Args:
+        skip_calendar_check: If True, skip calendar directory checks (for crypto mode)
+    """
     print("🔍 Performing Data Quality Checks...")
 
     config_manager = ConfigManager()
@@ -82,15 +86,22 @@ def check_data_quality():
     # Check calendars
     calendars_dir = data_path / "calendars"
     if not calendars_dir.exists():
-        print(f"❌ Calendars directory not found: {calendars_dir}")
-        return False
+        if skip_calendar_check:
+            print("ℹ️  Calendars directory not found (skipped for crypto mode)")
+        else:
+            print(f"❌ Calendars directory not found: {calendars_dir}")
+            return False
 
-    calendar_files = list(calendars_dir.glob("*.txt"))
-    if not calendar_files:
-        print("❌ No calendar files found")
-        return False
+    if calendars_dir.exists():
+        calendar_files = list(calendars_dir.glob("*.txt"))
+        if not calendar_files:
+            if skip_calendar_check:
+                print("ℹ️  No calendar files found (skipped for crypto mode)")
+            else:
+                print("❌ No calendar files found")
+                return False
 
-    print(f"✅ Found {len(calendar_files)} calendar files")
+        print(f"✅ Found {len(calendar_files)} calendar files")
 
     # Check date ranges
     workflow_config = config_manager.get_workflow_config()
