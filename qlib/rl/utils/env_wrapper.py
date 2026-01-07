@@ -8,6 +8,7 @@ from typing import Any, Callable, cast, Dict, Generic, Iterable, Iterator, Optio
 
 import gym
 from gym import Space
+import numpy as np
 
 from qlib.rl.aux_info import AuxiliaryInfoCollector
 from qlib.rl.interpreter import ActionInterpreter, ObsType, PolicyActType, StateInterpreter
@@ -143,7 +144,7 @@ class EnvWrapper(
     def observation_space(self) -> Space:
         return self.state_interpreter.observation_space
 
-    def reset(self, **kwargs: Any) -> ObsType:
+    def reset(self, **kwargs: Any) -> tuple[ObsType, dict]:
         """
         Try to get a state from state queue, and init the simulator with this state.
         If the queue is exhausted, generate an invalid (nan) observation.
@@ -185,14 +186,15 @@ class EnvWrapper(
 
             self.status["obs_history"].append(obs)
 
-            return obs
+            # Gymnasium expects reset to return (obs, info), so return an empty info dict.
+            return obs, {}
 
         except StopIteration:
             # The environment should be recycled because it's in a dead state.
             self.seed_iterator = None
-            return generate_nan_observation(self.observation_space)
+            return generate_nan_observation(self.observation_space), {}
 
-    def step(self, policy_action: PolicyActType, **kwargs: Any) -> Tuple[ObsType, float, bool, InfoDict]:
+    def step(self, policy_action: PolicyActType, **kwargs: Any) -> Tuple[ObsType, float, bool, bool, InfoDict]:
         """Environment step.
 
         See the code along with comments to get a sequence of things happening here.
@@ -203,6 +205,23 @@ class EnvWrapper(
 
         # Clear the logged information from last step
         self.logger.reset()
+
+        # Normalize policy_action to a scalar if necessary. Some vectorized
+        # collectors may pass 0-d or 1-d arrays; accept those and extract a
+        # single element for single-agent envs.
+        if isinstance(policy_action, (list, tuple)):
+            if len(policy_action) == 1:
+                policy_action = policy_action[0]
+        if isinstance(policy_action, np.ndarray):
+            if policy_action.size == 1:
+                policy_action = policy_action.item()
+            else:
+                # if array has identical elements, pick the first
+                try:
+                    if np.all(policy_action == policy_action.flat[0]):
+                        policy_action = policy_action.flat[0]
+                except Exception:
+                    pass
 
         # Action is what we have got from policy
         self.status["action_history"].append(policy_action)
@@ -244,7 +263,10 @@ class EnvWrapper(
         self.logger.add_any("policy_act", policy_action, loglevel=LogLevel.DEBUG)
 
         info_dict = InfoDict(log=self.logger.logs(), aux_info=aux_info)
-        return obs, rew, done, info_dict
+        # Follow Gymnasium API: return (obs, reward, terminated, truncated, info)
+        terminated = bool(done)
+        truncated = False
+        return obs, rew, terminated, truncated, info_dict
 
     def render(self, mode: str = "human") -> None:
         raise NotImplementedError("Render is not implemented in EnvWrapper.")

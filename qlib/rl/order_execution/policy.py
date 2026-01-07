@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, OrderedDict, Tuple, cast
+import inspect
 
-import gym
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -129,7 +130,10 @@ class PPO(PPOPolicy):
         deterministic_eval: bool = True,
         weight_file: Optional[Path] = None,
     ) -> None:
-        assert isinstance(action_space, Discrete)
+        # Accept Discrete from both `gym` and `gymnasium` by checking for
+        # the discrete attribute `n` instead of strict isinstance.
+        if getattr(action_space, "n", None) is None:
+            raise AssertionError("action_space must be Discrete-like (have attribute 'n')")
         actor = PPOActor(network, action_space.n)
         critic = PPOCritic(network)
         optimizer = torch.optim.Adam(
@@ -137,11 +141,8 @@ class PPO(PPOPolicy):
             lr=lr,
             weight_decay=weight_decay,
         )
-        super().__init__(
-            actor,
-            critic,
-            optimizer,
-            torch.distributions.Categorical,
+        # Call parent constructor with compatibility across tianshou versions.
+        common_kwargs = dict(
             discount_factor=discount_factor,
             max_grad_norm=max_grad_norm,
             reward_normalization=reward_normalization,
@@ -153,7 +154,20 @@ class PPO(PPOPolicy):
             deterministic_eval=deterministic_eval,
             observation_space=obs_space,
             action_space=action_space,
+            # For discrete action spaces, disable action scaling to satisfy
+            # newer tianshou validations (action_scaling only allowed for Box).
+            action_scaling=(getattr(action_space, "n", None) is None),
         )
+
+        try:
+            # Most tianshou versions accept positional args: (actor, critic, optim, dist_fn, ...)
+            super().__init__(actor, critic, optimizer, torch.distributions.Categorical, **common_kwargs)
+        except TypeError:
+            # Try common keyword variants used across versions
+            try:
+                super().__init__(actor=actor, critic=critic, optim=optimizer, dist_fn=torch.distributions.Categorical, **common_kwargs)
+            except TypeError:
+                super().__init__(actor=actor, critic=critic, optimizer=optimizer, dist=torch.distributions.Categorical, **common_kwargs)
         if weight_file is not None:
             set_weight(self, Trainer.get_policy_state_dict(weight_file))
 

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Callable, ContextManager, Dict, Generic, 
 
 import numpy as np
 from tianshou.data import Collector, VectorReplayBuffer
+from tianshou.policy.base import policy_within_training_step
+from tianshou.utils.torch_utils import torch_train_mode
 from tianshou.env import BaseVectorEnv
 from tianshou.policy import BasePolicy
 
@@ -178,9 +180,71 @@ class TrainingVessel(TrainingVesselBase):
             else:
                 episodes = self.episode_per_iter
 
-            col_result = collector.collect(n_episode=episodes)
-            update_result = self.policy.update(sample_size=0, buffer=collector.buffer, **self.update_kwargs)
-            res = {**col_result, **update_result}
+            # Ensure the collector resets environments before collecting so
+            # initial `obs` and `info` are available (prevents Collector error).
+            col_result = collector.collect(n_episode=episodes, reset_before_collect=True)
+            # Newer tianshou requires update() to be called within a training-step context.
+            with policy_within_training_step(self.policy, enabled=True), torch_train_mode(self.policy, enabled=True):
+                update_result = self.policy.update(sample_size=0, buffer=collector.buffer, **self.update_kwargs)
+            # `col_result` is a CollectStats object. Convert to dict via its `pprint_asdict` helper.
+            # CollectStats.pprint_asdict() may print and return None; handle that.
+            try:
+                tmp_col = col_result.pprint_asdict()
+            except Exception:
+                tmp_col = None
+            if isinstance(tmp_col, dict):
+                col_dict = tmp_col
+            else:
+                # fallback: use __dict__
+                col_dict = dict(col_result.__dict__)
+
+            # Normalize update_result into a plain dict safely. Some policy.update
+            # implementations may return None, a dict, or a custom object.
+            if update_result is None:
+                update_dict: Dict[str, Any] = {}
+            elif isinstance(update_result, dict):
+                update_dict = update_result
+            else:
+                # Try common conversion helpers, then fallback to dict() safely.
+                if hasattr(update_result, "pprint_asdict"):
+                    try:
+                        tmp = update_result.pprint_asdict()
+                        update_dict = tmp if isinstance(tmp, dict) else {}
+                    except Exception:
+                        update_dict = {}
+                elif hasattr(update_result, "to_dict"):
+                    try:
+                        tmp = update_result.to_dict()
+                        update_dict = tmp if isinstance(tmp, dict) else {}
+                    except Exception:
+                        update_dict = {}
+                else:
+                    try:
+                        update_dict = dict(update_result)
+                    except Exception:
+                        update_dict = {}
+
+            # Merge collect stats and update results safely. Avoid using **
+            # on unknown objects which may be None or non-mapping.
+            res = dict(col_dict)
+            if isinstance(update_result, dict):
+                res.update(update_result)
+            else:
+                # Try to extract mapping-like info from update_result
+                if hasattr(update_result, "pprint_asdict"):
+                    try:
+                        tmp = update_result.pprint_asdict()
+                    except Exception:
+                        tmp = None
+                    if isinstance(tmp, dict):
+                        res.update(tmp)
+                elif hasattr(update_result, "to_dict"):
+                    try:
+                        tmp = update_result.to_dict()
+                    except Exception:
+                        tmp = None
+                    if isinstance(tmp, dict):
+                        res.update(tmp)
             self.log_dict(res)
             return res
 
