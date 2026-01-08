@@ -272,6 +272,10 @@ class CryptoCollector(BaseCollector):
                     _resp["date"] = [x.strftime("%Y-%m-%d %H:%M:%S") for x in _resp["date"]]
                 _resp = _resp.drop(columns=['timestamp'])
                 if _resp.shape[0] != 0:
+                    # Calculate VWAP as proxy if not provided
+                    _resp["vwap"] = (_resp["open"] + _resp["high"] + _resp["low"] + _resp["close"]) / 4
+                    # Convert volume to USDT value (scaled by 1000) for cross-symbol comparability
+                    _resp["volume"] = (_resp["close"] * _resp["volume"]) / 1000.0
                     return _resp.reset_index(drop=True)
         except Exception as e:
             logger.warning(f"{error_msg}:{e}")

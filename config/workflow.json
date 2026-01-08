@@ -36,7 +36,8 @@
       "high",
       "low",
       "close",
-      "volume"
+      "volume",
+      "vwap"
     ],
     "instruments_file": "instruments.txt",
     "data_source": "db"

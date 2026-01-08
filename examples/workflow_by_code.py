@@ -45,7 +45,7 @@ if __name__ == "__main__":
         freq="60min",
         date_field_name="date",
         symbol_field_name="symbol",
-        include_fields="open,high,low,close,volume"
+        include_fields="open,high,low,close,volume,vwap"
     ).dump()
 
     # 3. Initialize Qlib
