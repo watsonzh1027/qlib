@@ -13,6 +13,7 @@ sys.path.append(str(CUR_DIR))
 sys.path.append(str(CUR_DIR.parent.parent))
 from data_collector.base import BaseCollector, BaseNormalize, BaseRun
 from data_collector.utils import deco_retry
+from qlib.utils import code_to_fname
 from scripts.symbol_utils import normalize_symbols_list
 
 import ccxt
@@ -176,6 +177,45 @@ class CryptoCollector(BaseCollector):
         sym = symbol.replace("/", "_")
         return f"{sym}_{self.interval}_{self.market_type}"
 
+    def save_instrument(self, symbol, df: pd.DataFrame):
+        """save instrument data to file with custom formatting"""
+        if df is None or df.empty:
+            logger.warning(f"{symbol} is empty")
+            return
+
+        # 1. Generate filename using the custom naming convention
+        filename_base = self.normalize_symbol(symbol)
+        filename_base = code_to_fname(filename_base)
+        instrument_path = self.save_dir.joinpath(f"{filename_base}.csv")
+
+        # 2. Set 'symbol' column to a clean format (e.g., BTC_USDT)
+        clean_symbol = symbol.replace("/", "_")
+        df["symbol"] = clean_symbol
+
+        # 3. Remove redundant 'timestamp' if 'date' is present
+        if "timestamp" in df.columns and "date" in df.columns:
+            df = df.drop(columns=["timestamp"])
+
+        # 4. Reorder columns: 'date' first, then 'symbol', then OHLCV
+        cols = ["date", "symbol"] + [c for c in df.columns if c not in ["date", "symbol"]]
+        df = df[cols]
+
+        # 5. Handle existing data and deduplicate
+        if instrument_path.exists():
+            try:
+                _old_df = pd.read_csv(instrument_path)
+                df = pd.concat([_old_df, df], sort=False)
+                df = df.drop_duplicates(subset=["date"], keep="last")
+            except Exception as e:
+                logger.warning(f"Failed to merge with existing data for {symbol}: {e}")
+
+        # 6. Final reorder to guarantee 'date' is the first column and 'symbol' is second
+        cols = ["date", "symbol"] + [c for c in df.columns if c not in ["date", "symbol"]]
+        df = df[cols]
+
+        # 7. Save to CSV
+        df.to_csv(instrument_path, index=False)
+
     @staticmethod
     def get_data_from_remote(symbol, interval, start, end, market_type="spot", limit=100):
         logger.info(f"Downloading {symbol} ({interval}, {market_type})...")
@@ -255,9 +295,9 @@ class CryptoCollector(BaseCollector):
 
 
 # Keep these for backward compatibility
-CryptoCollector1d = CryptoCollector
-CryptoCollector1h = CryptoCollector
-CryptoCollector1min = CryptoCollector
+#CryptoCollector1d = CryptoCollector
+#CryptoCollector1h = CryptoCollector
+#CryptoCollector1min = CryptoCollector
 
 
 class CryptoNormalize(BaseNormalize):
