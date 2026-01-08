@@ -598,6 +598,9 @@ def convert_to_qlib(source: str = None):
     # Determine data source
     if source is None:
         source = data_convertor.get("data_source", "csv")
+        
+    if source not in ["csv", "db", "both"]:
+        raise ValueError(f"Invalid data source: {source}")
     
     input_dir = data_config.get("csv_data_dir", "data/klines")
     output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data"))
