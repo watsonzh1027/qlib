@@ -228,6 +228,7 @@ class ALSTM(Model):
         train_loss = 0
         best_score = -np.inf
         best_epoch = 0
+        best_param = copy.deepcopy(self.ALSTM_model.state_dict())
         evals_result["train"] = []
         evals_result["valid"] = []
 

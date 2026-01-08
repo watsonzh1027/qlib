@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 def load_logging_config() -> Dict[str, Any]:
-    """Load logging parameters from centralized trading_params.json."""
+    """Load logging parameters from centralized workflow.json."""
     # Resolve project root (src/utils/logging_config.py -> src/utils -> src -> qlib-crypto)
     project_root = Path(__file__).parent.parent.parent
-    config_path = project_root / "config" / "trading_params.json"
+    config_path = project_root / "config" / "workflow.json"
     
     if config_path.exists():
         try:
@@ -64,15 +64,28 @@ def rotate_numbered_logs(directory: Path, base_name: str, extension: str, max_in
     return new_log
 
 def setup_logging(skip_rotation: bool = False) -> logging.Logger:
-    """Setup standard logging based on trading_params.json with manual rotation."""
+    """Setup standard logging based on workflow.json with manual rotation."""
     log_cfg = load_logging_config()
     
     log_level_str = log_cfg.get("level", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
     
-    # Parameters for rotation
-    log_base = log_cfg.get("log_base", "glib-crypto")
+    # Identify module name from sys.argv[0]
+    module_name = "unknown"
+    if hasattr(sys, 'argv') and sys.argv[0]:
+        module_name = Path(sys.argv[0]).stem
+    
+    # Handle log_file template
+    log_file_tmpl = log_cfg.get("log_file", "<module.name>")
+    log_suffix = log_file_tmpl.replace("<module.name>", module_name)
+    
+    # Configuration for rotation
+    # If log_suffix is not empty and not the template, use it in the log name
+    log_base = log_cfg.get("log_base", "qlib-")
+    combined_log_base = f"{log_base}{log_suffix}" if log_suffix else log_base
+    
     max_index = int(log_cfg.get("max_index", 9))
+    output_modes = [m.strip().lower() for m in log_cfg.get("output", "file").split(",")]
     
     # Get root logger
     logger = logging.getLogger()
@@ -89,31 +102,35 @@ def setup_logging(skip_rotation: bool = False) -> logging.Logger:
     )
     
     # Console Handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    if "console" in output_modes:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     
     # Rotating File logic
-    project_root = Path(__file__).parent.parent.parent
-    log_dir = project_root / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Extension and rotation
-    extension = ".log"
-    # Perform manual rotation at startup if not skipped
-    if not skip_rotation:
-        log_path = rotate_numbered_logs(log_dir, log_base, extension, max_index)
+    if "file" in output_modes:
+        project_root = Path(__file__).parent.parent.parent
+        log_dir = project_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Extension and rotation
+        extension = ".log"
+        # Perform manual rotation at startup if not skipped
+        if not skip_rotation:
+            log_path = rotate_numbered_logs(log_dir, combined_log_base, extension, max_index)
+        else:
+            log_path = log_dir / f"{combined_log_base}-1{extension}"
+        
+        # Use mode='a' if skipping rotation to append to existing log, 'w' otherwise
+        mode = 'a' if skip_rotation else 'w'
+        file_handler = logging.FileHandler(log_path, mode=mode, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        logger.info(f"Logging initialized with level: {log_level_str}")
+        logger.info(f"Current log file: {log_path.name}")
     else:
-        log_path = log_dir / f"{log_base}-1{extension}"
-    
-    # Use mode='a' if skipping rotation to append to existing log, 'w' otherwise
-    mode = 'a' if skip_rotation else 'w'
-    file_handler = logging.FileHandler(log_path, mode=mode, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    
-    logger.info(f"Logging initialized with level: {log_level_str}")
-    logger.info(f"Current log file: {log_path.name}")
+        logger.info(f"Logging initialized with level: {log_level_str} (Console only)")
     
     # Log the full command line for traceability
     try:
@@ -132,4 +149,4 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     return logging.getLogger()
 
 # Auto-initialize on import
-setup_logging()
+#setup_logging()

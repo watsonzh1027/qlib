@@ -2,6 +2,7 @@
   "logging": {
     "level": "DEBUG",
     "log_file": "<module.name>",
+    "output": "file, console",
     "log_base": "qlib-",
     "max_index": 9
   },

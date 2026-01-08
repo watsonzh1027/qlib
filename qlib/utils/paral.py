@@ -31,7 +31,7 @@ class ParallelExt(Parallel):
 
 
 def datetime_groupby_apply(
-    df, apply_func: Union[Callable, Text], axis=0, level="datetime", resample_rule="ME", n_jobs=-1
+    df, apply_func: Union[Callable, Text], axis=0, level="datetime", resample_rule="W", n_jobs=-1
 ):
     """datetime_groupby_apply
     This function will apply the `apply_func` on the datetime level index.
