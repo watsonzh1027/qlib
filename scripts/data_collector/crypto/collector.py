@@ -1,6 +1,11 @@
 import abc
 import sys
+import os
 import datetime
+
+# Disable Fire pager globally to ensure help stays in the terminal
+os.environ["FIRE_PAGER"] = "cat"
+os.environ["FIRE_USE_PAGER"] = "0"
 from pathlib import Path
 
 import fire
@@ -9,8 +14,10 @@ from loguru import logger
 from dateutil.tz import tzlocal
 
 CUR_DIR = Path(__file__).resolve().parent
-sys.path.append(str(CUR_DIR))
-sys.path.append(str(CUR_DIR.parent.parent))
+PROJECT_ROOT = CUR_DIR.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(CUR_DIR)) # For BaseRun's importlib.import_module("collector")
 from data_collector.base import BaseCollector, BaseNormalize, BaseRun
 from data_collector.utils import deco_retry
 from qlib.utils import code_to_fname
@@ -348,57 +355,65 @@ CryptoNormalize1h = CryptoNormalize
 CryptoNormalize1min = CryptoNormalize
 
 
-class Run(BaseRun):
+class Run:
     def __init__(self, source_dir=None, normalize_dir=None, max_workers=1, interval="1d", config_path="config/workflow.json"):
         """
+        Crypto Data Collector CLI.
 
-        Parameters
-        ----------
-        source_dir: str
-            The directory where the raw data collected from the Internet is saved, default "Path(__file__).parent/source"
-        normalize_dir: str
-            Directory for normalize data, default "Path(__file__).parent/normalize"
-        max_workers: int
-            Concurrent number, default is 1
-        interval: str
-            freq, value from [1min, 5min, 15min, 30min, 1h, 4h, 1d, 1w], default 1d
+        Unified Command Interface:
+          python collector.py [FLAGS] COMMAND
+
+        COMMANDS:
+          download    Download raw OHLCV data from exchange (supports increments).
+          normalize   Process raw CSV files into Qlib-formatted files.
+
+        FLAGS (Configuration):
+          --config_path   Path to workflow.json (default: config/workflow.json)
+          --source_dir    The directory where the raw data is saved.
+          --normalize_dir Directory for normalize data.
+          --max_workers   Concurrent number (default: 1).
+          --interval      Frequency (1min, 1h, 1d, etc.)
         """
-        self.config_manager = ConfigManager(config_path)
-        config = self.config_manager.load_config()
+        self._source_dir_arg = source_dir
+        self._normalize_dir_arg = normalize_dir
+        self._max_workers_arg = max_workers
+        self._interval_arg = interval
+        self.config_path = config_path
+        self._prepared = False
 
-        # Load defaults from config if not provided
-        if source_dir is None:
-            # Try data.csv_data_dir first, then legacy data_dir, then default
-            source_dir = config.get("data", {}).get("csv_data_dir") or config.get("data_dir", "data/klines")
+    def _prepare_conf(self):
+        if self._prepared:
+            return
+        self._config_manager = ConfigManager(self.config_path)
+        config = self._config_manager.load_config()
+
+        # Resolve source_dir
+        self.source_dir = self._source_dir_arg
+        if self.source_dir is None:
+            self.source_dir = config.get("data", {}).get("csv_data_dir") or config.get("data_dir", "data/klines")
+        self.source_dir = Path(self.source_dir).expanduser().resolve()
+        self.source_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve normalize_dir
+        self.normalize_dir = self._normalize_dir_arg
+        if self.normalize_dir is None:
+            self.normalize_dir = config.get("data", {}).get("normalize_dir") or "data/normalize"
+        self.normalize_dir = Path(self.normalize_dir).expanduser().resolve()
+        self.normalize_dir.mkdir(parents=True, exist_ok=True)
 
         self.market_type = config.get("data", {}).get("market_type", "spot")
         self.limit = config.get("data_collection", {}).get("limit", 100)
 
-        if interval == "1d": # if default
-             # Try to get from config, map 1m to 1min if needed for qlib
+        # Resolve interval
+        self.interval = self._interval_arg
+        if self.interval == "1d": 
              cfg_interval = config.get("data_collection", {}).get("interval", "1d")
-             if cfg_interval == '1m':
-                 interval = "1min"
-             elif cfg_interval == '1d':
-                 interval = "1d"
-             else:
-                 interval = cfg_interval # fallback
+             self.interval = "1min" if cfg_interval == "1m" else cfg_interval
+             
+        self.max_workers = self._max_workers_arg
+        self._prepared = True
 
-        super().__init__(source_dir, normalize_dir, max_workers, interval)
-
-    @property
-    def collector_class_name(self):
-        return "CryptoCollector"
-
-    @property
-    def normalize_class_name(self):
-        return "CryptoNormalize"
-
-    @property
-    def default_base_dir(self) -> [Path, str]:
-        return CUR_DIR
-
-    def download_data(
+    def download(
         self,
         max_collector_count=2,
         delay=0,
@@ -408,79 +423,77 @@ class Run(BaseRun):
         limit_nums=None,
         symbol_file=None,
     ):
-        """download data from Internet
-
-        Parameters
-        ----------
-        max_collector_count: int
-            default 2
-        delay: float
-            time.sleep(delay), default 0
-        interval: str
-            freq, value from [1min, 1d], default 1d, currently only supprot 1d
-        start: str
-            start datetime, default "2000-01-01"
-        end: str
-            end datetime, default ``pd.Timestamp(datetime.datetime.now() + pd.Timedelta(days=1))``
-        check_data_length: int # if this param useful?
-            check data length, if not None and greater than 0, each symbol will be considered complete if its data length is greater than or equal to this value, otherwise it will be fetched again, the maximum number of fetches being (max_collector_count). By default None.
-        limit_nums: int
-            using for debug, by default None
-
-        Examples
-        ---------
-            # get daily data
-            $ python collector.py download_data --source_dir ~/.qlib/crypto_data/source/1d --start 2015-01-01 --end 2021-11-30 --delay 1 --interval 1d
-        """
-
-        # Load range from configured if not provided
+        """download data from Internet"""
+        self._prepare_conf()
         if start is None:
-            start = self.config_manager.get_with_defaults("data_collection", "start_time", "2020-01-01")
+            start = self._config_manager.get_with_defaults("data_collection", "start_time", "2020-01-01")
         if end is None:
-            end = self.config_manager.get("data_collection", "end_time")
-            if not end or str(end).strip() == "":
-                end = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+            end = self._config_manager.get("data_collection", "end_time") or pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if symbol_file is None:
-            symbol_file = self.config_manager.get("data", "symbols")
+            symbol_file = self._config_manager.get("data", "symbols")
             if symbol_file:
-                 # Resolve relative path
-                 full_path = Path(self.config_manager.config_path).parent.parent / symbol_file
-                 if full_path.exists():
-                     symbol_file = str(full_path)
-                 else:
-                     logger.warning(f"Symbol file {symbol_file} not found at {full_path}")
-            else:
-                 logger.info("No symbol file configured, downloading all available symbols.")
+                 full_path = Path(self._config_manager.config_path).parent.parent / symbol_file
+                 symbol_file = str(full_path) if full_path.exists() else None
 
-        super(Run, self).download_data(
-            max_collector_count,
-            delay,
-            start,
-            end,
-            check_data_length,
-            limit_nums,
+        CryptoCollector(
+            self.source_dir,
+            max_workers=self.max_workers,
+            max_collector_count=max_collector_count,
+            delay=delay,
+            start=start,
+            end=end,
+            interval=self.interval,
+            check_data_length=check_data_length,
+            limit_nums=limit_nums,
             symbol_file=symbol_file,
             market_type=self.market_type,
             limit=self.limit,
+        ).collector_data()
+
+    def normalize(self, date_field_name: str = "date", symbol_field_name: str = "symbol", **kwargs):
+        """normalize data"""
+        self._prepare_conf()
+        from data_collector.base import Normalize
+        yc = Normalize(
+            source_dir=self.source_dir,
+            target_dir=self.normalize_dir,
+            normalize_class=CryptoNormalize,
+            max_workers=self.max_workers,
+            date_field_name=date_field_name,
+            symbol_field_name=symbol_field_name,
+            **kwargs,
         )
-
-    def normalize_data(self, date_field_name: str = "date", symbol_field_name: str = "symbol"):
-        """normalize data
-
-        Parameters
-        ----------
-        date_field_name: str
-            date field name, default date
-        symbol_field_name: str
-            symbol field name, default symbol
-
-        Examples
-        ---------
-            $ python collector.py normalize_data --source_dir ~/.qlib/crypto_data/source/1d --normalize_dir ~/.qlib/crypto_data/source/1d_nor --interval 1d --date_field_name date
-        """
-        super(Run, self).normalize_data(date_field_name, symbol_field_name)
+        yc.normalize()
 
 
 if __name__ == "__main__":
+    # Custom help for the base cases to ensure it stays on screen and is accurate
+    if len(sys.argv) == 1 or sys.argv[1] in ["--help", "-h"]:
+        help_text = """
+NAME
+    collector.py - Crypto Data Collector CLI.
+
+SYNOPSIS
+    python collector.py COMMAND [FLAGS]
+
+COMMANDS
+    download    Download raw OHLCV data from exchange (supports increments).
+    normalize   Process raw CSV files into Qlib-formatted files.
+
+FLAGS (Global Configuration):
+    -c, --config_path   Path to workflow.json (default: config/workflow.json)
+    -s, --source_dir    The directory where raw CSV data is stored.
+    -n, --normalize_dir The directory for Qlib-normalized data.
+    -m, --max_workers   Number of parallel processes (default: 1).
+    -i, --interval      Frequency of data (e.g., 1min, 1h, 1d).
+
+Examples:
+    python collector.py download -i 1h
+    python collector.py normalize -c config/workflow.json
+"""
+        print(help_text)
+        sys.exit(0)
+        
+    # Use class for proper global flag parsing and help inheritance
     fire.Fire(Run)

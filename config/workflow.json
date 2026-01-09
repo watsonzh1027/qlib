@@ -8,14 +8,15 @@
   },
   "data": {
     "csv_data_dir": "data/klines",
+    "normalize_dir": "data/normalize",
     "bin_data_dir": "data/qlib_data/crypto",
     "market_type": "future",
     "symbols": "config/top50_symbols.json"
   },
   "data_collection": {
-    "interval": "1h",
+    "interval": "4h",
     "api_timeout": 10,
-    "start_time": "2025-01-01",
+    "start_time": "2024-01-01",
     "end_time": "",
     "limit": 1000,
     "overlap_minutes": 5,
