@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from qlib.utils import init_instance_by_config
 from qlib.data import D
 from qlib.utils.logging_config import get_logger, setup_logging
+from qlib.contrib.data.loader import Alpha158DL, Alpha360DL
 from pathlib import Path
 import os
 import torch
@@ -21,12 +22,14 @@ SYMBOL = "eth_usdt_1h_future"  # ETH_USDT
 FREQ = "60min"
 
 # Data Configuration
-DATA_HANDLER_CLASS = "Alpha360"
-DATA_HANDLER_MODULE = "qlib.contrib.data.handler"
+DATA_HANDLER_CLASS = "DataHandlerLP" # Use base class for hybrid features
+DATA_HANDLER_MODULE = "qlib.data.dataset.handler"
+TS_STEP_LEN = 20 # Sequence length for LSTM
+CORR_THRESHOLD = 0.98 # Threshold to remove highly correlated features
 
 # Model Configuration
 MODEL_CLASS = "ALSTM"
-MODEL_MODULE = "qlib.contrib.model.pytorch_alstm"
+MODEL_MODULE = "qlib.contrib.model.pytorch_alstm_ts"
 
 # Time Range
 START_TIME = "2025-01-01"
@@ -51,6 +54,9 @@ def inspect_data(logger, df, name="Dataset"):
     """
     Inspects the dataset for anomalies and potential issues.
     """
+    if not hasattr(df, "isna"):
+        logger.info(f"--- {name} is {type(df)}. Skipping detailed inspection. ---")
+        return
     logger.info(f"--- Inspecting {name} ---")
     total_samples = len(df)
     logger.info(f"Total samples: {total_samples}")
@@ -84,42 +90,89 @@ def inspect_data(logger, df, name="Dataset"):
         "total_samples": total_samples
     }
 
+def drop_correlated_features(df, threshold=0.98, logger=None):
+    """
+    Identifies and drops highly correlated features and constant features.
+    """
+    if logger:
+        logger.info(f"Checking for redundant features with threshold {threshold}...")
+    
+    # 1. Drop constant features
+    constant_cols = [c for c in df.columns if df[c].nunique() <= 1]
+    if logger and len(constant_cols) > 0:
+        logger.info(f"Dropped {len(constant_cols)} constant features: {constant_cols}")
+    df = df.drop(columns=constant_cols)
+
+    # 2. Drop highly correlated features
+    corr_matrix = df.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
+    
+    if logger:
+        logger.info(f"Dropped {len(to_drop)} features due to high correlation ({len(df.columns) - len(to_drop)} remaining).")
+        if len(to_drop) > 0:
+            logger.debug(f"Dropped features: {to_drop}")
+            
+    return df.drop(columns=to_drop), constant_cols + to_drop
+
 def run_model_test():
-    # 1. Initialize Qlib with high level to suppress its default qlib.log/console output
+    # 0. Prepare Hybrid Features
+    f158, n158 = Alpha158DL.get_feature_config()
+    f360, n360 = Alpha360DL.get_feature_config()
+    
+    # Combined features and unique names
+    hybrid_features = f158 + f360
+    hybrid_names = [f"A158_{n}" for n in n158] + [f"A360_{n}" for n in n360]
+
+    # 1. Initialize Qlib
     import logging as logging_module
     qlib.init(provider_uri=PROVIDER_URI, logging_level=logging_module.WARNING)
     
-    # 2. Setup Logging (AFTER qlib.init to hijack and override its handlers)
+    # 2. Setup Logging
     setup_logging()
     logger = get_logger("model_test")
-    logger.info(f"Step 1: Qlib initialized. Starting Model Test for {SYMBOL}")
+    logger.info(f"Step 1: Qlib initialized. Hybrid Features: {len(hybrid_features)}")
     market = [SYMBOL]
 
     # 3. Data Preparation
-    # We add processors to Alpha360 for better stability
     handler_kwargs = {
         "class": DATA_HANDLER_CLASS,
         "module_path": DATA_HANDLER_MODULE,
         "kwargs": {
             "start_time": START_TIME,
             "end_time": END_TIME,
-            "fit_start_time": TRAIN_START,
-            "fit_end_time": TRAIN_END,
             "instruments": market,
-            "freq": FREQ,
+            "data_loader": {
+                "class": "QlibDataLoader",
+                "kwargs": {
+                    "config": {
+                        "feature": (hybrid_features, hybrid_names),
+                        "label": (["Ref($close, -2)/Ref($close, -1) - 1"], ["LABEL0"]),
+                    },
+                    "freq": FREQ,
+                }
+            },
             "infer_processors": [
                 {"class": "ProcessInf", "kwargs": {}},
                 {"class": "Fillna", "kwargs": {}},
             ],
             "learn_processors": [
                 {"class": "DropnaProcessor", "kwargs": {"fields_group": "feature"}},
-                {"class": "ZScoreNorm", "kwargs": {"fields_group": "feature"}},
+                {
+                    "class": "RobustZScoreNorm", 
+                    "kwargs": {
+                        "fields_group": "feature", 
+                        "clip_outlier": True,
+                        "fit_start_time": TRAIN_START,
+                        "fit_end_time": TRAIN_END,
+                    }
+                },
             ],
         },
     }
 
     dataset_config = {
-        "class": "DatasetH",
+        "class": "DatasetH", # Use simple DatasetH initially for correlation
         "module_path": "qlib.data.dataset",
         "kwargs": {
             "handler": handler_kwargs,
@@ -142,36 +195,53 @@ def run_model_test():
     
     heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
     heartbeat_thread.start()
-
     try:
-        logger.info(f"Loading Dataset ({DATA_HANDLER_CLASS}) with Normalization...")
+        logger.info(f"Loading Initial Dataset for Feature Selection...")
+        dataset_init = init_instance_by_config(dataset_config)
+        
+        # Data Inspection & Feature Selection
+        logger.info("Preparing training features for correlation analysis...")
+        df_train_init = dataset_init.prepare("train", col_set="feature")
+        
+        # Feature Selection: Remove correlated features
+        df_train_filtered, to_drop = drop_correlated_features(df_train_init, threshold=CORR_THRESHOLD, logger=logger)
+        
+        # Identify indices to keep
+        remaining_indices = [i for i, name in enumerate(hybrid_names) if name not in to_drop]
+        final_features = [hybrid_features[i] for i in remaining_indices]
+        final_names = [hybrid_names[i] for i in remaining_indices]
+        
+        # Re-initialize the final handler and dataset with reduced features and TSDatasetH
+        logger.info(f"Re-initializing TSDatasetH with {len(final_names)} selected features...")
+        handler_kwargs["kwargs"]["data_loader"]["kwargs"]["config"]["feature"] = (final_features, final_names)
+        dataset_config["class"] = "TSDatasetH"
+        dataset_config["kwargs"]["handler"] = handler_kwargs
+        dataset_config["kwargs"]["step_len"] = TS_STEP_LEN
         dataset = init_instance_by_config(dataset_config)
         
-        # Data Inspection
-        logger.info("Preparing training features (this may take several minutes)...")
+        logger.info("Preparing final datasets...")
         df_train_feat = dataset.prepare("train", col_set="feature")
-        logger.info("Preparing training labels...")
         df_train_label = dataset.prepare("train", col_set="label")
     finally:
         stop_heartbeat = True
     
-    inspect_data(logger, df_train_feat, name="Training Features")
+    inspect_data(logger, df_train_filtered, name="Training Features (Selected)")
     inspect_data(logger, df_train_label, name="Training Labels")
-    
-    actual_d_feat = df_train_feat.shape[1]
-    logger.info(f"Dataset loaded. Total feature dimension: {actual_d_feat}")
 
-    # For Alpha360, d_feat for ALSTM should be 6
-    alstm_d_feat = 6 if actual_d_feat == 360 else actual_d_feat
+    actual_d_feat = len(df_train_filtered.columns)
+    logger.info(f"Dataset loaded. Final feature dimension after selection: {actual_d_feat}")
+
+    alstm_d_feat = actual_d_feat
 
     # 4. Hyperparameter Optimization with Optuna
     logger.info(f"Step 2: Optimizing {MODEL_CLASS} with Optuna ({N_TRIALS} trials)")
     
     def objective(trial):
+        # We need to use the dataset with SELECTED features
         params = {
             "d_feat": alstm_d_feat,
-            "hidden_size": trial.suggest_categorical("hidden_size", [16, 32]),
-            "num_layers": trial.suggest_int("num_layers", 1, 2),
+            "hidden_size": trial.suggest_categorical("hidden_size", [16, 32, 64]),
+            "num_layers": trial.suggest_int("num_layers", 1, 3),
             "dropout": 0.1,
             "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
             "n_epochs": 10, 
@@ -188,16 +258,24 @@ def run_model_test():
         }
         
         model = init_instance_by_config(model_config)
+        # fit() on ALSTM_TS handles the TSDatasetH correctly
         model.fit(dataset)
         
+        # TS-compatible predict/prepare
         pred = model.predict(dataset, segment="valid")
-        label = dataset.prepare(segments="valid", col_set="label")
+        # Get labels directly from handler for the same segment and align with pred's index
+        label_df = dataset.handler.fetch(dataset.segments["valid"], col_set="label")
         
-        # Flatten label and drop NaNs for metric calculation
+        # Align label with pred index (both are <datetime, instrument>)
+        label_series = label_df.reindex(pred.index).iloc[:, 0]
+        
         pred_val = pred.values
-        label_val = label.values.flatten()
-        mask = ~np.isnan(label_val)
+        label_val = label_series.values
         
+        mask = ~np.isnan(label_val)
+        if len(label_val[mask]) == 0:
+            return 1e10
+            
         mse = ((pred_val[mask] - label_val[mask]) ** 2).mean()
         logger.info(f"Trial {trial.number} finished with MSE: {mse:.8f}")
         return mse
@@ -214,6 +292,7 @@ def run_model_test():
         "d_feat": alstm_d_feat,
         "n_epochs": 30, 
         "early_stop": 10,
+        "batch_size": 1024,
         "GPU": GPU_ID,
         "seed": 42,
     })
@@ -228,7 +307,9 @@ def run_model_test():
     best_model.fit(dataset)
 
     test_pred = best_model.predict(dataset, segment="test")
-    test_label = dataset.prepare(segments="test", col_set="label")
+    # Fetch labels from handler and align with pred index
+    test_label_df = dataset.handler.fetch(dataset.segments["test"], col_set="label")
+    test_label = test_label_df.reindex(test_pred.index).iloc[:, 0]
 
     # 6. Visualization
     logger.info("Step 4: Visualizing Results")

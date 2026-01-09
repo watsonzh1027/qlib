@@ -275,7 +275,7 @@ class CryptoCollector(BaseCollector):
                     # Calculate VWAP as proxy if not provided
                     _resp["vwap"] = (_resp["open"] + _resp["high"] + _resp["low"] + _resp["close"]) / 4
                     # Convert volume to USDT value (scaled by 1000) for cross-symbol comparability
-                    _resp["volume"] = (_resp["close"] * _resp["volume"]) / 1000.0
+                    _resp["volume"] = (_resp["vwap"] * _resp["volume"]) / 1000.0
                     return _resp.reset_index(drop=True)
         except Exception as e:
             logger.warning(f"{error_msg}:{e}")
