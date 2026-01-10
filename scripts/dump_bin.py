@@ -177,11 +177,13 @@ class DumpDataBase:
         return fname_to_code(file_path.stem.strip().lower())
 
     def get_dump_fields(self, df_columns: Iterable[str]) -> Iterable[str]:
-        return (
+        fields = (
             self._include_fields
             if self._include_fields
-            else set(df_columns) - set(self._exclude_fields) if self._exclude_fields else df_columns
+            else set(df_columns) - set(self._exclude_fields) if self._exclude_fields else set(df_columns)
         )
+        # symbol_field_name and date_field_name should be excluded from features
+        return [f for f in fields if f not in [self.symbol_field_name, self.date_field_name]]
 
     @staticmethod
     def _read_calendars(calendar_path: Path) -> List[pd.Timestamp]:

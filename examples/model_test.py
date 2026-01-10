@@ -18,8 +18,8 @@ import time as t_module
 # 1. PARAMETERS - ADJUST THESE AS NEEDED
 # ==============================================================================
 PROVIDER_URI = "data/qlib_data/crypto"
-SYMBOL = "eth_usdt_1h_future"  # ETH_USDT
-FREQ = "60min"
+SYMBOL = "eth_usdt_4h_future"  # ETH_USDT 4H
+FREQ = "240min"
 
 # Data Configuration
 DATA_HANDLER_CLASS = "DataHandlerLP" # Use base class for hybrid features
@@ -32,17 +32,17 @@ MODEL_CLASS = "ALSTM"
 MODEL_MODULE = "qlib.contrib.model.pytorch_alstm_ts"
 
 # Time Range
-START_TIME = "2025-01-01"
-END_TIME = "2025-10-31" 
-TRAIN_START = "2025-01-01"
-TRAIN_END = "2025-06-01"
-VALID_START = "2025-06-02"
-VALID_END = "2025-08-01"
-TEST_START = "2025-08-02"
-TEST_END = "2025-10-31"
+START_TIME = "2020-01-01"
+END_TIME = "2026-01-01" 
+TRAIN_START = "2020-01-01"
+TRAIN_END = "2023-12-31"
+VALID_START = "2024-01-01"
+VALID_END = "2024-12-31"
+TEST_START = "2025-01-01"
+TEST_END = "2025-12-31"
 
 # Optimization Configuration
-N_TRIALS = 10  
+N_TRIALS = 20  
 GPU_ID = 0 if torch.cuda.is_available() else -1
 
 # Visualization Settings

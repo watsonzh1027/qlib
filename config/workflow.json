@@ -16,7 +16,7 @@
   "data_collection": {
     "interval": "4h",
     "api_timeout": 10,
-    "start_time": "2024-01-01",
+    "start_time": "2020-01-01",
     "end_time": "",
     "limit": 1000,
     "overlap_minutes": 5,
@@ -44,9 +44,9 @@
     "data_source": "db"
   },
   "workflow": {
-    "start_time": "2025-01-01",
-    "end_time": "2025-10-31",
-    "frequency": "1h",
+    "start_time": "2020-01-01",
+    "end_time": "",
+    "frequency": "4h",
     "instruments_limit": 50
   },
   "backtest": {
@@ -55,7 +55,7 @@
     "account": 1000000,
     "benchmark": null,
     "exchange_kwargs": {
-      "freq": "1h",
+      "freq": "4h",
       "limit_threshold": null,
       "deal_price": "close",
       "open_cost": 0.001,
