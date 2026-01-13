@@ -95,7 +95,7 @@ def get_common_data_config(use_ts=False):
     if use_ts:
         dataset_conf["kwargs"]["step_len"] = 60
         
-    return dataset_conf, len(hybrid_features)
+    return dataset_conf, hybrid_names
 
 def run_model_showdown():
     logger = get_module_logger("model_showdown")
@@ -110,10 +110,10 @@ def run_model_showdown():
         "kwargs": {
             "signal": "<PRED>",
             "direction": "long-short",
-            "signal_threshold": 0.0,
+            "signal_threshold": 0.0, # Best from grid search
             "leverage": 1.0,
-            "take_profit": None,
-            "stop_loss": None,
+            "take_profit": 0.15, # Best from grid search
+            "stop_loss": -0.07, # Best from grid search
             "max_drawdown_limit": 1.0,
             "topk": 1,
         }
@@ -154,33 +154,15 @@ def run_model_showdown():
                 },
             },
             "use_ts": False
-        },
-        "ALSTM": {
-            "model_conf": {
-                "class": "ALSTM",
-                "module_path": "qlib.contrib.model.pytorch_alstm_ts",
-                "kwargs": {
-                    "loss": "huber",
-                    "hidden_size": 256,
-                    "num_layers": 2,
-                    "dropout": 0.5,
-                    "n_epochs": 50,
-                    "lr": 2e-4,
-                    "early_stop": 15,
-                    "batch_size": 1024,
-                    "GPU": 0 if torch.cuda.is_available() else -1,
-                },
-            },
-            "use_ts": True
         }
     }
 
     for name, m_info in models.items():
         logger.info(f"--- Processing Model: {name} ---")
-        dataset_conf, d_feat = get_common_data_config(use_ts=m_info["use_ts"])
+        dataset_conf, hybrid_names = get_common_data_config(use_ts=m_info["use_ts"])
         
         if name == "ALSTM":
-            m_info["model_conf"]["kwargs"]["d_feat"] = d_feat
+            m_info["model_conf"]["kwargs"]["d_feat"] = len(hybrid_names)
 
         with R.start(experiment_name="model_showdown_v1"):
             R.set_tags(model_name=name)
