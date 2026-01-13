@@ -13,7 +13,11 @@ dist/
 *.pkl
 *.hd5
 *.csv
+/data/
 data/
+tmp/
+tests/
+cache/
 .env
 .vim
 .nvimrc

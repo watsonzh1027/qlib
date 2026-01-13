@@ -182,6 +182,42 @@ class Log(NpElemOperator):
         super(Log, self).__init__(feature, "log")
 
 
+class Sin(NpElemOperator):
+    """Feature Sin
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance
+
+    Returns
+    ----------
+    Expression
+        a feature instance with sin
+    """
+
+    def __init__(self, feature):
+        super(Sin, self).__init__(feature, "sin")
+
+
+class Cos(NpElemOperator):
+    """Feature Cos
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance
+
+    Returns
+    ----------
+    Expression
+        a feature instance with cos
+    """
+
+    def __init__(self, feature):
+        super(Cos, self).__init__(feature, "cos")
+
+
 class Mask(NpElemOperator):
     """Feature Mask
 
@@ -1591,6 +1627,8 @@ OpsList = [
     Abs,
     Sign,
     Log,
+    Sin,
+    Cos,
     Power,
     Add,
     Sub,

@@ -15,6 +15,7 @@ from .rule_strategy import (
 )
 
 from .cost_control import SoftTopkStrategy
+from .crypto_strategy import CryptoLongShortStrategy
 
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "SBBStrategyBase",
     "SBBStrategyEMA",
     "SoftTopkStrategy",
+    "CryptoLongShortStrategy",
 ]

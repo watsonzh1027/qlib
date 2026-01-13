@@ -144,6 +144,12 @@ class ALSTM(Model):
         loss = weight * (pred - label) ** 2
         return torch.mean(loss)
 
+    def huber(self, pred, label, weight, delta=1.0):
+        loss = torch.where(torch.abs(pred - label) < delta, 
+                           0.5 * (pred - label) ** 2, 
+                           delta * (torch.abs(pred - label) - 0.5 * delta))
+        return torch.mean(weight * loss)
+
     def loss_fn(self, pred, label, weight=None):
         mask = ~torch.isnan(label)
 
@@ -152,6 +158,8 @@ class ALSTM(Model):
 
         if self.loss == "mse":
             return self.mse(pred[mask], label[mask], weight[mask])
+        elif self.loss == "huber":
+            return self.huber(pred[mask], label[mask], weight[mask])
 
         raise ValueError("unknown loss `%s`" % self.loss)
 
@@ -232,14 +240,14 @@ class ALSTM(Model):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.n_jobs,
-            drop_last=True,
+            drop_last=False,
         )
         valid_loader = DataLoader(
             ConcatDataset(dl_valid, wl_valid),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.n_jobs,
-            drop_last=True,
+            drop_last=False,
         )
 
         save_path = get_or_create_path(save_path)

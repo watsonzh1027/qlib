@@ -279,8 +279,8 @@ class CryptoCollector(BaseCollector):
                     _resp["date"] = [x.strftime("%Y-%m-%d %H:%M:%S") for x in _resp["date"]]
                 _resp = _resp.drop(columns=['timestamp'])
                 if _resp.shape[0] != 0:
-                    # Calculate VWAP as proxy if not provided
-                    _resp["vwap"] = (_resp["open"] + _resp["high"] + _resp["low"] + _resp["close"]) / 4
+                    # Typical Price formula as VWAP proxy
+                    _resp["vwap"] = (_resp["high"] + _resp["low"] + _resp["close"]) / 3.0
                     # Convert volume to USDT value (scaled by 1000) for cross-symbol comparability
                     _resp["volume"] = (_resp["vwap"] * _resp["volume"]) / 1000.0
                     return _resp.reset_index(drop=True)
@@ -289,20 +289,67 @@ class CryptoCollector(BaseCollector):
 
     def get_data(
         self, symbol: str, interval: str, start_datetime: pd.Timestamp, end_datetime: pd.Timestamp
-    ) -> [pd.DataFrame]:
-        def _get_simple(start_, end_):
+    ) -> pd.DataFrame:
+        """
+        Fetch data for the given symbol and interval. 
+        If interval > 1min, download 1min data and resample for accurate VWAP.
+        """
+        requested_interval = interval
+        base_interval = "1min"
+
+        def _fetch(freq, start, end):
             self.sleep()
-            _remote_interval = interval
             return self.get_data_from_remote(
                 symbol,
-                interval=_remote_interval,
-                start=start_,
-                end=end_,
+                interval=freq,
+                start=start,
+                end=end,
                 market_type=self.market_type,
                 limit=self.limit,
             )
 
-        return _get_simple(start_datetime, end_datetime)
+        if requested_interval == base_interval:
+            return _fetch(base_interval, start_datetime, end_datetime)
+
+        # For higher intervals, try to fetch 1min data and resample
+        logger.info(f"Attempting to fetch 1min data for resampling: {symbol}...")
+        df = _fetch(base_interval, start_datetime, end_datetime)
+
+        if df is None or df.empty or len(df) < 10: 
+            logger.info(f"Fallback: Fetching {requested_interval} directly for {symbol}")
+            return _fetch(requested_interval, start_datetime, end_datetime)
+
+        logger.info(f"Resampling 1min data to {requested_interval} for {symbol}")
+
+        # Resample logic
+        df["date"] = pd.to_datetime(df["date"])
+        df.set_index("date", inplace=True)
+        
+        # Mapping Qlib interval to Pandas freq
+        freq_map = {"1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w", "15min": "15min", "30min": "30min", "5min": "5min"}
+        pandas_freq = freq_map.get(requested_interval, requested_interval)
+
+        # Resample OHLC
+        resampled = df.resample(pandas_freq).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum", # This is the sum of scaled USDT volumes
+        })
+
+        # Calculate accurate VWAP: Sum(Price * Vol) / Sum(Vol)
+        # Note: In our system, 'volume' is already (Price * CoinVol) / 1000
+        # So Sum(volume) = Sum(Price * CoinVol) / 1000
+        # We need CoinVol to weight properly. 
+        # CoinVol_i = (volume_i * 1000) / vwap_i
+        df["coin_vol"] = (df["volume"] * 1000.0) / df["vwap"]
+        vwap_resampled = (df["volume"].resample(pandas_freq).sum() * 1000.0) / df["coin_vol"].resample(pandas_freq).sum()
+        
+        resampled["vwap"] = vwap_resampled
+        resampled = resampled.dropna(subset=["open"]) # Remove empty bars
+        
+        return resampled.reset_index()
 
 
 # Keep these for backward compatibility

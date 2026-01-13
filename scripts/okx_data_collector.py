@@ -53,11 +53,7 @@ TIMEFRAME = config.get("data_collection", {}).get("interval", "1m")
 _global_output_format = "csv"
 _global_postgres_storage = None
 
-def set_global_output_config(output_format: str, postgres_storage=None):
-    """Set global output configuration for save_klines function."""
-    global _global_output_format, _global_postgres_storage
-    _global_output_format = output_format
-    _global_postgres_storage = postgres_storage
+ 
 
 # Global variables for output configuration
 _global_output_format = "csv"
