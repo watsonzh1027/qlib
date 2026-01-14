@@ -174,8 +174,20 @@ class Exchange:
 
         # 　get volume limit from kwargs
         self.buy_vol_limit, self.sell_vol_limit, vol_lt_fields = self._get_vol_limit(volume_threshold)
+        
+        # Crypto Patch: Detect missing fields
+        necessary_fields = {self.buy_price, self.sell_price, "$close", "$volume"}
+        self.missing_fields = []
+        
+        # We check $factor and $change existence by looking at what we can load
+        for f in ["$factor", "$change"]:
+            try:
+                # Try a very small query to see if expression exists
+                D.features([self.codes[0]], [f], self.start_time, self.start_time, freq=self.freq)
+                necessary_fields.add(f)
+            except Exception:
+                self.missing_fields.append(f)
 
-        necessary_fields = {self.buy_price, self.sell_price, "$close", "$change", "$factor", "$volume"}
         if self.limit_type == self.LT_TP_EXP:
             assert isinstance(limit_threshold, tuple)
             for exp in limit_threshold:
@@ -211,6 +223,12 @@ class Exchange:
             disk_cache=True,
         )
         self.quote_df.columns = self.all_fields
+        
+        # Crypto Patch: Inject missing fields
+        if "$factor" in self.missing_fields:
+            self.quote_df["$factor"] = 1.0
+        if "$change" in self.missing_fields:
+            self.quote_df["$change"] = 0.0
 
         # check buy_price data and sell_price data
         for attr in ("buy_price", "sell_price"):
@@ -219,7 +237,8 @@ class Exchange:
                 self.logger.warning("{} field data contains nan.".format(pstr))
 
         # update trade_w_adj_price
-        if (self.quote_df["$factor"].isna() & ~self.quote_df["$close"].isna()).any():
+        # Check if $factor exists in columns before checking NaNs
+        if "$factor" in self.quote_df.columns and (self.quote_df["$factor"].isna() & ~self.quote_df["$close"].isna()).any():
             # The 'factor.day.bin' file not exists, and `factor` field contains `nan`
             # Use adjusted price
             self.trade_w_adj_price = True
@@ -409,10 +428,11 @@ class Exchange:
         direction: int | None = None,
     ) -> bool:
         # check if stock can be traded
-        return not (
-            self.check_stock_suspended(stock_id, start_time, end_time)
-            or self.check_stock_limit(stock_id, start_time, end_time, direction)
-        )
+        suspended = self.check_stock_suspended(stock_id, start_time, end_time)
+        limited = self.check_stock_limit(stock_id, start_time, end_time, direction)
+        if suspended or limited:
+             print(f"DEBUG: Exchange Stock {stock_id} NOT TRADABLE | Suspended: {suspended} | Limited: {limited} | Range: {start_time} - {end_time}")
+        return not (suspended or limited)
 
     def check_order(self, order: Order) -> bool:
         # check limit and suspended

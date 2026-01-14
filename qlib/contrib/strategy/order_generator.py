@@ -189,24 +189,16 @@ class OrderGenWOInteract(OrderGenerator):
         current_stock = current.get_stock_list()
         amount_dict = {}
         for stock_id in target_weight_position:
-            # Current rule will ignore the stock that not hold and cannot be traded at predict date
             if trade_exchange.is_stock_tradable(
                 stock_id=stock_id, start_time=trade_start_time, end_time=trade_end_time
             ) and trade_exchange.is_stock_tradable(
                 stock_id=stock_id, start_time=pred_start_time, end_time=pred_end_time
             ):
-                amount_dict[stock_id] = (
-                    risk_total_value
-                    * target_weight_position[stock_id]
-                    / trade_exchange.get_close(stock_id, start_time=pred_start_time, end_time=pred_end_time)
-                )
-                # TODO: Qlib use None to represent trading suspension.
-                #  So last close price can't be the estimated trading price.
-                # Maybe a close price with forward fill will be a better solution.
+                close = trade_exchange.get_close(stock_id, start_time=pred_start_time, end_time=pred_end_time)
+                amount_dict[stock_id] = risk_total_value * target_weight_position[stock_id] / close
             elif stock_id in current_stock:
-                amount_dict[stock_id] = (
-                    risk_total_value * target_weight_position[stock_id] / current.get_stock_price(stock_id)
-                )
+                close = current.get_stock_price(stock_id)
+                amount_dict[stock_id] = risk_total_value * target_weight_position[stock_id] / close
             else:
                 continue
         order_list = trade_exchange.generate_order_for_target_amount_position(

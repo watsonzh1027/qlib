@@ -11,10 +11,10 @@
     "normalize_dir": "data/normalize",
     "bin_data_dir": "data/qlib_data/crypto",
     "market_type": "future",
-    "symbols": "config/top50_symbols.json"
+    "symbols": "config/instruments.json"
   },
   "data_collection": {
-    "interval": "4h",
+    "interval": "1h",
     "api_timeout": 10,
     "start_time": "2020-01-01",
     "end_time": "",
@@ -44,7 +44,7 @@
     "data_source": "db"
   },
   "workflow": {
-    "start_time": "2020-01-01",
+    "start_time": "2023-01-01",
     "end_time": "",
     "frequency": "4h",
     "instruments_limit": 50
@@ -86,25 +86,80 @@
     }
   },
   "data_handler_config": {
-    "class": "Alpha158",
-    "module_path": "qlib.contrib.data.handler",
+    "class": "CryptoAlpha158WithFunding",
+    "module_path": "qlib.contrib.data.handler_crypto",
     "kwargs": {
       "start_time": "<workflow.start_time>",
-      "end_time": "<workflow.end_time>",
+      "end_time": "2026-01-01",
       "instruments": "<data.symbols>",
-      "freq": "1h",
+      "freq": "4h",
       "fit_start_time": "<workflow.start_time>",
-      "fit_end_time": "",
+      "fit_end_time": "2023-12-31",
       "infer_processors": [],
       "learn_processors": []
     }
   },
-  "trading": {
-    "open_cost": 0.001,
-    "close_cost": 0.001,
-    "min_cost": 0.001,
-    "strategy_topk": 50,
-    "strategy_n_drop": 5
+  "training": {
+    "start_time": "2023-01-01",
+    "end_time": "2025-12-31",
+    "model_type": "lightgbm",
+    "feature_handler": "<data_handler_config.class>",
+    "device": "auto",
+    "seed": 42,
+    "rolling_window": {
+      "fold_ratio": [
+        6,
+        1,
+        2
+      ],
+      "step_months": 3,
+      "n_folds": 3
+    },
+    "models": {
+      "lightgbm": {
+        "loss": "mse",
+        "colsample_bytree": 0.8879,
+        "learning_rate": 0.01,
+        "subsample": 0.8789,
+        "lambda_l1": 0.01,
+        "lambda_l2": 0.001,
+        "max_depth": 6,
+        "num_leaves": 70,
+        "num_threads": 20
+      },
+      "xgboost": {
+        "booster": "gbtree",
+        "learning_rate": 0.01,
+        "max_depth": 6,
+        "n_estimators": 500,
+        "objective": "reg:squarederror"
+      },
+      "lstm": {
+        "d_feat": 158,
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.2,
+        "n_epochs": 100,
+        "lr": 0.001,
+        "batch_size": 512,
+        "early_stop": 20,
+        "loss": "mse",
+        "optimizer": "adam"
+      },
+      "alstm": {
+        "d_feat": 158,
+        "hidden_size": 32,
+        "num_layers": 2,
+        "dropout": 0.44304854580666014,
+        "n_epochs": 100,
+        "lr": 0.0016462719266471676,
+        "batch_size": 512,
+        "early_stop": 20,
+        "loss": "mse",
+        "optimizer": "adam",
+        "rnn_type": "LSTM"
+      }
+    }
   },
   "dataset": {
     "class": "DatasetH",
@@ -127,16 +182,21 @@
       "class": "SimulatorExecutor",
       "module_path": "qlib.backtest.executor",
       "kwargs": {
-        "time_per_step": "1h",
+        "time_per_step": "4h",
         "generate_portfolio_metrics": true
       }
     },
     "strategy": {
-      "class": "TopkDropoutStrategy",
-      "module_path": "qlib.contrib.strategy.signal_strategy",
+      "class": "CryptoLongShortStrategy",
+      "module_path": "qlib.contrib.strategy",
       "kwargs": {
-        "topk": "<trading.strategy_topk>",
-        "n_drop": "<trading.strategy_n_drop>"
+        "direction": "long-short",
+        "signal_threshold": 0.005,
+        "leverage": 2.0,
+        "take_profit": 0.08,
+        "stop_loss": -0.04,
+        "max_drawdown_limit": 0.20,
+        "topk": 1
       }
     },
     "backtest": {

@@ -92,12 +92,13 @@ class NumberedRotatingFileHandler(logging.handlers.RotatingFileHandler):
         if not self.delay:
             self.stream = self._open()
 
-def setup_logging(name: Optional[str] = None, skip_rotation: bool = False) -> logging.Logger:
+def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_subprocess: Optional[bool] = None) -> logging.Logger:
     """Setup standard logging based on workflow.json with manual rotation and multi-process support.
     
     Args:
         name: Optional logger name. If not provided, uses script name.
         skip_rotation: If True, skip manual rotation at startup.
+        is_subprocess: Explicitly specify if this is a sub-process. If None, auto-detect.
     """
     global _initialized_pid
     
@@ -124,12 +125,34 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False) -> lo
         log_file_tmpl = log_cfg.get("log_file", "<module.name>")
         log_suffix = log_file_tmpl.replace("<module.name>", module_name)
         
-        # Multi-process support: Check if we are in the main process
-        # In multi-processing, we add PID to filename for sub-processes to avoid collisions
-        is_main_process = (multiprocessing.current_process().name == 'MainProcess')
+        # Multi-process / Sub-process support
+        main_pid_env = os.environ.get("QLIB_MAIN_PID")
         
-        if not is_main_process:
-            log_suffix = f"{log_suffix}-{current_pid}"
+        if is_subprocess is None:
+            # Auto-detect subprocess status
+            if main_pid_env and int(main_pid_env) != current_pid:
+                # We have a parent Qlib process
+                actual_is_subprocess = True
+                main_pid = int(main_pid_env)
+            else:
+                # Check if it's a multiprocessing child (within same interpreter)
+                is_mp_child = (multiprocessing.current_process().name != 'MainProcess')
+                if is_mp_child:
+                    actual_is_subprocess = True
+                    main_pid = os.getppid()
+                else:
+                    # We are the Main Process
+                    actual_is_subprocess = False
+                    main_pid = current_pid
+                    # Set the environment variable for future child processes (multiprocessing or subprocess)
+                    os.environ["QLIB_MAIN_PID"] = str(current_pid)
+        else:
+            actual_is_subprocess = is_subprocess
+            main_pid = int(main_pid_env) if main_pid_env else current_pid
+
+        if actual_is_subprocess:
+            # Add main PID to suffix to group logs by session
+            log_suffix = f"{log_suffix}-{main_pid}"
         
         log_base = log_cfg.get("log_base", "qlib-")
         combined_log_base = f"{log_base}{log_suffix}" if log_suffix else log_base
@@ -165,7 +188,7 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False) -> lo
             
             extension = ".log"
             # Perform manual rotation at startup ONLY for the main process
-            if not skip_rotation and is_main_process:
+            if not skip_rotation and not actual_is_subprocess:
                 log_path = rotate_numbered_logs(log_dir, combined_log_base, extension, max_index)
                 mode = 'w'
             else:

@@ -13,15 +13,17 @@ import os
 
 def fetch_funding_rate_history(
     symbol: str = "BTC/USDT:USDT",
+    exchange_name: str = "binance",
     start_date: str = "2024-01-01",
     end_date: str = "2025-01-01",
     output_dir: str = "data/funding_rates"
 ):
     """
-    从 OKX 获取历史资金费率数据
+    从指定交易所获取历史资金费率数据
     
     Args:
         symbol: 交易对符号，格式为 "BTC/USDT:USDT" (永续合约)
+        exchange_name: 交易所名称 ('binance' 或 'okx')
         start_date: 开始日期，格式 "YYYY-MM-DD"
         end_date: 结束日期，格式 "YYYY-MM-DD"
         output_dir: 输出目录
@@ -30,59 +32,126 @@ def fetch_funding_rate_history(
         pd.DataFrame: 包含资金费率历史数据的 DataFrame
     """
     
-    # 初始化 OKX 交易所
-    exchange = ccxt.okx({
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'swap',  # 永续合约
-        }
-    })
+    # 初始化交易所
+    if exchange_name.lower() == 'binance':
+        exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+    elif exchange_name.lower() == 'okx':
+        exchange = ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    else:
+        raise ValueError(f"不支持的交易所: {exchange_name}")
     
     # 转换日期为时间戳（毫秒）
     start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
-    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000) + 86400000 # 加一天涵盖全天
     
     all_funding_rates = []
-    current_ts = start_ts
     
-    print(f"开始获取 {symbol} 的资金费率数据...")
+    print(f"开始从 {exchange_name} 获取 {symbol} 的资金费率数据...")
     print(f"时间范围: {start_date} 至 {end_date}")
     
-    while current_ts < end_ts:
-        try:
-            # OKX API: 获取资金费率历史
-            # 参考: https://www.okx.com/docs-v5/en/#public-data-rest-api-get-funding-rate-history
-            funding_rates = exchange.fetch_funding_rate_history(
-                symbol,
-                since=current_ts,
-                limit=100  # 每次最多获取 100 条
-            )
-            
-            if not funding_rates:
-                print(f"未获取到数据，时间戳: {current_ts}")
+    if exchange_name.lower() == 'binance':
+        # Binance 获取逻辑：支持 since 参数，按时间正序获取
+        current_ts = start_ts
+        while current_ts < end_ts:
+            try:
+                # fetch_funding_rate_history(symbol, since, limit)
+                batch = exchange.fetch_funding_rate_history(symbol, since=current_ts, limit=1000)
+                
+                if not batch:
+                    break
+                    
+                # 过滤超出结束时间的数据
+                batch = [x for x in batch if x['timestamp'] <= end_ts]
+                if not batch:
+                    break
+                    
+                for fr in batch:
+                    all_funding_rates.append({
+                        'timestamp': fr['timestamp'],
+                        'datetime': fr['datetime'],
+                        'symbol': fr['symbol'],
+                        'funding_rate': float(fr['fundingRate']),
+                        'funding_datetime': fr.get('fundingTime', None)
+                    })
+                
+                # 更新时间戳
+                last_ts = batch[-1]['timestamp']
+                current_ts = last_ts + 1 if last_ts >= current_ts else current_ts + 1
+                
+                print(f"已获取 {len(all_funding_rates)} 条记录，最新时间: {batch[-1]['datetime']}")
+                
+                # 如果最后一条数据已经接近或超过结束时间
+                if batch[-1]['timestamp'] >= end_ts:
+                    break
+                    
+                time.sleep(exchange.rateLimit / 1000)
+                
+            except Exception as e:
+                print(f"Binance 获取出错: {e}")
                 break
-            
-            for fr in funding_rates:
-                all_funding_rates.append({
-                    'timestamp': fr['timestamp'],
-                    'datetime': fr['datetime'],
-                    'symbol': fr['symbol'],
-                    'funding_rate': fr['fundingRate'],
-                    'funding_datetime': fr.get('fundingDatetime', None),
-                })
-            
-            # 更新时间戳到最后一条记录
-            current_ts = funding_rates[-1]['timestamp'] + 1
-            
-            print(f"已获取 {len(all_funding_rates)} 条记录，最新时间: {funding_rates[-1]['datetime']}")
-            
-            # 避免触发 API 限流
-            time.sleep(exchange.rateLimit / 1000)
-            
-        except Exception as e:
-            print(f"获取数据时出错: {e}")
-            break
-    
+                
+    elif exchange_name.lower() == 'okx':
+        # OKX 获取逻辑：需要特殊处理，这里使用 CCXT 的标准方法
+        # 注意：OKX API 仅返回最近的数据，如果需要完整历史需用 REST API 脚本逻辑
+        # 这里为了保持脚本简洁，使用 CCXT 标准逻辑，但提示用户限制
+        print("⚠️ 注意: OKX API 可能仅返回最近3个月的数据。如需更长历史，请使用 binance。")
+        
+        # OKX通常需要倒序或者有变种，但CCXT统一了接口。
+        # 我们尝试使用标准的 fetch_funding_rate_history
+        # 如果 CCXT 实现了分页，它会自动处理，否则可能只返回最近100条
+        
+        # 尝试标准获取（可能受限于 API）
+        current_ts = start_ts
+        first_run = True
+        
+        while current_ts < end_ts:
+            try:
+                funding_rates = exchange.fetch_funding_rate_history(symbol, since=current_ts, limit=100)
+                
+                if not funding_rates:
+                    break
+                    
+                # 检查是否真的获取到了指定时间的数据
+                if first_run and funding_rates[0]['timestamp'] > current_ts + 86400000 * 30: # 差距超过30天
+                     print(f"⚠️ API 返回的数据起始时间 ({funding_rates[0]['datetime']}) 远晚于请求时间 ({start_date})")
+                     print("这是 OKX API 的限制。")
+                     first_run = False
+                
+                new_records = False
+                for fr in funding_rates:
+                    # 简单去重：检查最后一条记录的时间戳
+                    if all_funding_rates and fr['timestamp'] <= all_funding_rates[-1]['timestamp']:
+                        continue
+                        
+                    if fr['timestamp'] > end_ts:
+                        continue
+                        
+                    all_funding_rates.append({
+                        'timestamp': fr['timestamp'],
+                        'datetime': fr['datetime'],
+                        'symbol': fr['symbol'],
+                        'funding_rate': float(fr['fundingRate']),
+                        'funding_datetime': fr.get('fundingTime', fr.get('fundingDatetime', None))
+                    })
+                    new_records = True
+                
+                if not new_records:
+                    break
+                    
+                # 更新时间戳
+                current_ts = funding_rates[-1]['timestamp'] + 1
+                
+                print(f"已获取 {len(all_funding_rates)} 条记录，最新时间: {funding_rates[-1]['datetime']}")
+                
+                if funding_rates[-1]['timestamp'] >= end_ts:
+                    break
+                
+                time.sleep(exchange.rateLimit / 1000)
+                
+            except Exception as e:
+                print(f"OKX 获取出错: {e}")
+                break
+
     # 转换为 DataFrame
     df = pd.DataFrame(all_funding_rates)
     
@@ -91,20 +160,34 @@ def fetch_funding_rate_history(
         return df
     
     # 数据处理
+    # 统一格式：timestamp(datetime), datetime(iso), symbol, funding_rate
+    # 注意：我们保留原始毫秒时间戳用于排序，但输出时转为 datetime 对象
+    df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df['funding_rate'] = df['funding_rate'].astype(float)
-    df = df.sort_values('timestamp').reset_index(drop=True)
     
     # 保存到 CSV
     os.makedirs(output_dir, exist_ok=True)
     symbol_clean = symbol.replace('/', '_').replace(':', '_')
+    # 文件名格式保持一致，不包含交易所名称以便后续脚本通用，或可选择包含
+    # 为了兼容性，我们保持原文件名格式: SYMBOL_funding_rate.csv
+    # 但由于可能有多个来源，如果目录相同会覆盖。
+    # 既然用户选择了 exchange，我们假设用户想要该 exchange 的数据作为 authoritative source
     output_file = os.path.join(output_dir, f"{symbol_clean}_funding_rate.csv")
-    df.to_csv(output_file, index=False)
+    
+    # 仅保存需要的列
+    cols = ['timestamp', 'datetime', 'symbol', 'funding_rate', 'funding_datetime']
+    # 确保列存在
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+            
+    df[cols].to_csv(output_file, index=False)
     
     print(f"\n数据已保存至: {output_file}")
     print(f"总记录数: {len(df)}")
+    print(f"时间范围: {df['timestamp'].min()} 至 {df['timestamp'].max()}")
     print(f"\n数据预览:")
-    print(df.head())
+    print(df[cols].head())
     print(f"\n统计信息:")
     print(df['funding_rate'].describe())
     
@@ -165,19 +248,14 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 获取 ETH 最近2年的数据
-  python %(prog)s --symbol ETH/USDT:USDT --start 2023-01-01 --end 2025-01-15
+  # 使用 Binance 获取 ETH 数据 (推荐，历史数据更全)
+  python %(prog)s --symbol ETH/USDT:USDT --exchange binance --start 2023-01-01
   
-  # 获取 BTC 数据并指定输出目录
-  python %(prog)s --symbol BTC/USDT:USDT --start 2022-01-01 --output data/funding_rates
+  # 使用 OKX 获取数据 (仅最近3个月)
+  python %(prog)s --symbol ETH/USDT:USDT --exchange okx --start 2025-10-01
   
-  # 获取多个币种（使用循环）
-  for symbol in BTC ETH SOL; do
-    python %(prog)s --symbol ${symbol}/USDT:USDT --start 2023-01-01
-  done
-  
-  # 使用简写参数
-  python %(prog)s -s ETH/USDT:USDT -b 2023-01-01 -e 2025-01-15
+  # 简写
+  python %(prog)s -s BTC/USDT:USDT -x binance -b 2020-01-01
         """
     )
     
@@ -186,6 +264,14 @@ if __name__ == "__main__":
         type=str,
         default='ETH/USDT:USDT',
         help='交易对符号，格式: BASE/QUOTE:SETTLE (默认: ETH/USDT:USDT)'
+    )
+    
+    parser.add_argument(
+        '-x', '--exchange',
+        type=str,
+        default='binance',
+        choices=['binance', 'okx'],
+        help='交易所 (默认: binance)'
     )
     
     parser.add_argument(
@@ -233,6 +319,7 @@ if __name__ == "__main__":
     print("=" * 80)
     print("资金费率数据获取工具")
     print("=" * 80)
+    print(f"交易所: {args.exchange}")
     print(f"交易对: {args.symbol}")
     print(f"时间范围: {args.start} 至 {args.end}")
     print(f"输出目录: {args.output}")
@@ -241,6 +328,7 @@ if __name__ == "__main__":
     # 获取资金费率数据
     df = fetch_funding_rate_history(
         symbol=args.symbol,
+        exchange_name=args.exchange,
         start_date=args.start,
         end_date=args.end,
         output_dir=args.output

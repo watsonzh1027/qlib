@@ -8,8 +8,12 @@ from qlib.workflow import R
 from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
 from qlib.contrib.data.loader import Alpha158DL, Alpha360DL
 from qlib.log import get_module_logger
+from qlib.utils.logging_config import setup_logging
 import argparse
 import os
+
+# Initialize enhanced logging
+logger = setup_logging(name="model_showdown")
 
 # ==============================================================================
 # PARAMETERS
@@ -61,7 +65,7 @@ def get_common_data_config(use_ts=False):
         "module_path": "qlib.data.dataset.handler",
         "kwargs": {
             "start_time": START_TIME, "end_time": END_TIME,
-            "instruments": [SYMBOL],
+            "instruments": ALL_SYMBOLS,
             "data_loader": {
                 "class": "QlibDataLoader",
                 "kwargs": {
@@ -110,11 +114,17 @@ def run_model_showdown():
         "kwargs": {
             "signal": "<PRED>",
             "direction": "long-short",
-            "signal_threshold": 0.0, # Best from grid search
+            "signal_threshold": 0.09,      # Optimized via grid search
             "leverage": 1.0,
-            "take_profit": 0.15, # Best from grid search
-            "stop_loss": -0.07, # Best from grid search
-            "max_drawdown_limit": 1.0,
+            "max_leverage": 2.0,           # Scale up to 2.0x if confidence is high
+            "min_sigma_threshold": 0.0,    # Set to 0 to use raw signals
+            "take_profit": 0.05,           # Optimized via grid search
+            "stop_loss": -0.07,            # Optimized via grid search
+            "trailing_sl": -0.05,          # Trailing stop
+            "max_hold_hours": 48,          # Exit if held > 2 days and stagnant
+            "stagnation_threshold": 0.01,
+            "target_symbols": [SYMBOL],    # Focus specifically on this symbol
+            "max_drawdown_limit": 1.0,     # Disable circuit breaker for raw evaluation
             "topk": 1,
         }
     }
@@ -142,13 +152,14 @@ def run_model_showdown():
                 "class": "LGBModel",
                 "module_path": "qlib.contrib.model.gbdt",
                 "kwargs": {
-                    "objective": "regression",
-                    "learning_rate": 0.05,
-                    "num_leaves": 128,
-                    "max_depth": 5,
+                    "early_stopping_rounds": 100,
+                    "num_boost_round": 1000,
+                    "learning_rate": 0.01,
+                    "num_leaves": 31,
+                    "max_depth": -1,
                     "subsample": 0.8,
                     "colsample_bytree": 0.8,
-                    "lambda_l2": 0.1,
+                    "lambda_l2": 1.0,  # Increased L2
                     "num_threads": 8,
                     "verbosity": -1,
                 },
@@ -164,7 +175,7 @@ def run_model_showdown():
         if name == "ALSTM":
             m_info["model_conf"]["kwargs"]["d_feat"] = len(hybrid_names)
 
-        with R.start(experiment_name="model_showdown_v1"):
+        with R.start(experiment_name="model_showdown"):
             R.set_tags(model_name=name)
             
             model = init_instance_by_config(m_info["model_conf"])
@@ -245,7 +256,7 @@ def run_model_showdown():
     print("="*70 + "\n")
 
     plt.figure(figsize=(10, 6))
-    recorders = R.list_recorders(experiment_name="model_showdown_v1")
+    recorders = R.list_recorders(experiment_name="model_showdown")
     for name in results:
         # Find the one with tag model_name == name
         for rid, rec in recorders.items():
@@ -256,7 +267,7 @@ def run_model_showdown():
                     plt.plot(cum_ret, label=f"{name} (Excess)")
                 break
 
-    plt.title("Model Showdown: LightGBM vs ALSTM (ETH 4H)")
+    plt.title(f"Model Showdown: {' vs '.join(results.keys())} (ETH 4H)")
     plt.xlabel("Datetime")
     plt.ylabel("Cumulative Excess Return")
     plt.legend()

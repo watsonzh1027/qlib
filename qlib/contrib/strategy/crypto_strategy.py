@@ -120,6 +120,7 @@ class CryptoLongShortStrategy(WeightStrategyBase):
         
         # 4. Filter Potential Entries
         potential_entries = score.copy()
+        
         if self.target_symbols is not None:
             potential_entries = potential_entries[potential_entries.index.isin(self.target_symbols)]
         
@@ -129,7 +130,7 @@ class CryptoLongShortStrategy(WeightStrategyBase):
         # Signal Threshold Filtering (Magnitude)
         if self.signal_threshold > 0:
             potential_entries = potential_entries[potential_entries.abs() >= self.signal_threshold]
-            
+
         # Sigma Threshold Filtering (Relative Confidence)
         if self.min_sigma_threshold > 0:
             qualified = []
