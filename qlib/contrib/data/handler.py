@@ -155,3 +155,11 @@ class Alpha158(DataHandlerLP):
 class Alpha158vwap(Alpha158):
     def get_label_config(self):
         return ["Ref($vwap, -2)/Ref($vwap, -1) - 1"], ["LABEL0"]
+
+
+# Import crypto-specific handlers
+try:
+    from .handler_crypto import CryptoAlpha158WithFunding
+except ImportError:
+    # handler_crypto may not be available in all environments
+    pass

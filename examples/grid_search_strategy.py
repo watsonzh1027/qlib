@@ -22,29 +22,32 @@ logging.getLogger("qlib").setLevel(logging.ERROR)
 
 def run_grid_search():
     # 1. Find the LightGBM recorder
-    exp_name = "model_showdown_v1"
-    recoders_dict = R.list_recorders(experiment_name=exp_name)
+    exp_name = "model_showdown"
+    recorders_dict = R.list_recorders(experiment_name=exp_name)
     lgbm_rec = None
-    for rid in recoders_dict:
-        rec = R.get_recorder(recorder_id=rid, experiment_name=exp_name)
+    
+    # Sort by creation time to get the latest
+    sorted_recs = sorted(recorders_dict.items(), key=lambda x: x[1].info['start_time'], reverse=True)
+    
+    for rid, rec in sorted_recs:
         if rec.list_tags().get('model_name') == 'LightGBM':
             lgbm_rec = rec
             break
     
     if not lgbm_rec:
-        print("LightGBM recorder not found!")
+        print(f"LightGBM recorder not found in experiment '{exp_name}'!")
         return
 
-    print(f"Found LightGBM Recorder: {lgbm_rec.info['id']}")
+    print(f"Using LightGBM Recorder: {lgbm_rec.info['id']} (started at {lgbm_rec.info['start_time']})")
     
-    # Load filtered prediction for ETH only (already filtered in model_showdown.py)
-    # Actually, model_showdown.py filtered it and saved it.
+    # Load prediction
     pred = lgbm_rec.load_object("pred.pkl")
     
     # Grid parameters
-    thresholds = [0.0, 0.005, 0.01]
-    stop_losses = [-0.03, -0.05, -0.07]
-    take_profits = [0.05, 0.10, 0.15]
+    # Note: Mean score is around 0.09, so we search around that.
+    thresholds = [0.0, 0.08, 0.09, 0.10] 
+    stop_losses = [-0.03, -0.05, -0.07, -0.10, None]
+    take_profits = [0.05, 0.10, 0.15, 0.20, None]
     
     results = []
     
@@ -53,10 +56,10 @@ def run_grid_search():
         "class": "CryptoLongShortStrategy",
         "module_path": "qlib.contrib.strategy",
         "kwargs": {
-            "signal": pred, # Pass the pred dataframe directly
+            "signal": pred,
             "direction": "long-short",
             "leverage": 1.0,
-            "max_drawdown_limit": 1.0,
+            "min_sigma_threshold": 0.0, # Disable sigma for now
             "topk": 1,
         }
     }
@@ -64,8 +67,6 @@ def run_grid_search():
     backtest_conf = {
         "start_time": TEST_START,
         "end_time": TEST_END,
-        "account": 1000000,
-        "benchmark": None,
         "exchange_kwargs": {
             "codes": [SYMBOL],
             "freq": FREQ,
@@ -73,9 +74,12 @@ def run_grid_search():
             "deal_price": "close",
             "open_cost": 0.0005,
             "close_cost": 0.0005,
-            "min_cost": 5,
+            "min_cost": 0.0,
         },
     }
+    
+    from qlib.backtest import backtest as qlib_backtest
+    from qlib.backtest.executor import SimulatorExecutor
 
     count = 0
     total = len(thresholds) * len(stop_losses) * len(take_profits)
@@ -94,13 +98,6 @@ def run_grid_search():
                     "take_profit": tp
                 })
                 
-                # We need to run the backtest. 
-                # Since we don't want to create 27 recorders in the main experiment, 
-                # we will use a dedicated temporary experiment or just run the simulation.
-                
-                from qlib.backtest import backtest as qlib_backtest
-                from qlib.backtest.executor import SimulatorExecutor
-                
                 executor = SimulatorExecutor(time_per_step=FREQ, generate_portfolio_metrics=True)
                 
                 try:
@@ -114,19 +111,18 @@ def run_grid_search():
                     )
                     
                     report_df, _ = portfolio_metric_dict.get(FREQ)
+                    if report_df is None or report_df.empty:
+                        continue
+                        
+                    # Calculate net returns (subtract cost)
+                    net_returns = report_df['return'] - report_df.get('cost', 0)
                     
-                    # Calculate metrics
-                    # Excess return with cost is usually what we care about
-                    # In this case, since benchmark is None, excess return = absolute return
-                    
-                    ar = report_df['return'].mean() * 365 * (24*60 / 240) # Annualized return approx
-                    vol = report_df['return'].std() * np.sqrt(365 * (24*60 / 240))
+                    ar = net_returns.mean() * 365 * 6 
+                    vol = net_returns.std() * np.sqrt(365 * 6)
                     sharpe = ar / vol if vol > 0 else 0
                     
-                    cum_ret = (1 + report_df['return']).prod() - 1
-                    mdd = (report_df['return'].cumsum() - report_df['return'].cumsum().cummax()).min()
-                    # More accurate MDD:
-                    cum_wealth = (1 + report_df['return']).cumprod()
+                    cum_wealth = (1 + net_returns).cumprod()
+                    cum_ret = cum_wealth.iloc[-1] - 1
                     mdd = (cum_wealth / cum_wealth.cummax() - 1).min()
                     
                     res = {
@@ -134,21 +130,27 @@ def run_grid_search():
                         "ann_ret": ar, "sharpe": sharpe, "mdd": mdd, "cum_ret": cum_ret
                     }
                     results.append(res)
-                    print(f"[{count}/{total}] thr={thr}, sl={sl}, tp={tp} | Sharpe: {sharpe:.4f}, AnnRet: {ar:.2%}, MDD: {mdd:.2%}")
+                    if count % 10 == 0:
+                        print(f"Progress: {count}/{total} done...")
                 except Exception as e:
-                    print(f"[{count}/{total}] Error for thr={thr}, sl={sl}, tp={tp}: {e}")
+                    pass
 
     # 4. Summary
     res_df = pd.DataFrame(results)
+    if res_df.empty:
+        print("No results found!")
+        return
+
     res_df = res_df.sort_values(by="sharpe", ascending=False)
     print("\nGrid Search Results (Top 10 by Sharpe):")
     print(res_df.head(10).to_string(index=False))
     
+    os.makedirs("docs", exist_ok=True)
     res_df.to_csv("docs/strategy_grid_search_results.csv", index=False)
     
     best = res_df.iloc[0]
     print(f"\nBest Parameters: thr={best['thr']}, sl={best['sl']}, tp={best['tp']}")
-    print(f"Best Sharpe: {best['sharpe']:.4f}")
+    print(f"Best Sharpe: {best['sharpe']:.4f} | AnnRet: {best['ann_ret']:.2%} | MDD: {best['mdd']:.2%}")
 
 if __name__ == "__main__":
     run_grid_search()

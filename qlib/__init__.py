@@ -16,6 +16,7 @@ from typing import Union
 from ruamel.yaml import YAML
 
 from .log import get_module_logger
+from .utils.logging_config import setup_logging
 
 
 # init qlib
@@ -40,6 +41,10 @@ def init(default_conf="client", **kwargs):
     from .data.cache import H  # pylint: disable=C0415
 
     logger = get_module_logger("Initialization")
+    
+    # Initialize optimized logging if not explicitly skipped
+    if not kwargs.get("skip_logging_setup", False):
+        setup_logging()
 
     skip_if_reg = kwargs.pop("skip_if_reg", False)
     if skip_if_reg and C.registered:

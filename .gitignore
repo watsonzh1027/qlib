@@ -13,7 +13,7 @@ dist/
 *.pkl
 *.hd5
 *.csv
-/data/
+# /data/
 data/
 tmp/
 tests/
