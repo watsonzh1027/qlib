@@ -430,9 +430,11 @@ class Exchange:
         # check if stock can be traded
         suspended = self.check_stock_suspended(stock_id, start_time, end_time)
         limited = self.check_stock_limit(stock_id, start_time, end_time, direction)
+        
         if suspended or limited:
-             print(f"DEBUG: Exchange Stock {stock_id} NOT TRADABLE | Suspended: {suspended} | Limited: {limited} | Range: {start_time} - {end_time}")
-        return not (suspended or limited)
+            return False
+            
+        return True
 
     def check_order(self, order: Order) -> bool:
         # check limit and suspended
@@ -576,34 +578,28 @@ class Exchange:
         tradable_weight = 0.0
         for stock_id, wp in weight_position.items():
             if self.is_stock_tradable(stock_id=stock_id, start_time=start_time, end_time=end_time):
-                # weight_position must be greater than 0 and less than 1
-                if wp < 0 or wp > 1:
-                    raise ValueError(
-                        "weight_position is {}, " "weight_position is not in the range of (0, 1).".format(wp),
-                    )
-                tradable_weight += wp
+                # CRYPTO PATCH: Allow any weight (for leverage and shorting)
+                tradable_weight += abs(wp)
 
-        if tradable_weight - 1.0 >= 1e-5:
-            raise ValueError("tradable_weight is {}, can not greater than 1.".format(tradable_weight))
+        if tradable_weight == 0:
+            return {}
 
         amount_dict = {}
-        for stock_id in weight_position:
-            if weight_position[stock_id] > 0.0 and self.is_stock_tradable(
+        for stock_id, wp in weight_position.items():
+            if wp != 0.0 and self.is_stock_tradable(
                 stock_id=stock_id,
                 start_time=start_time,
                 end_time=end_time,
             ):
-                amount_dict[stock_id] = (
-                    cash
-                    * weight_position[stock_id]
-                    / tradable_weight
-                    // self.get_deal_price(
-                        stock_id=stock_id,
-                        start_time=start_time,
-                        end_time=end_time,
-                        direction=direction,
-                    )
+                price = self.get_deal_price(
+                    stock_id=stock_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    direction=direction,
                 )
+                if price > 0:
+                    # CRYPTO PATCH: Use float division ( / ) instead of integer division ( // )
+                    amount_dict[stock_id] = (cash * wp / price)
         return amount_dict
 
     def get_real_deal_amount(self, current_amount: float, target_amount: float, factor: float | None = None) -> float:

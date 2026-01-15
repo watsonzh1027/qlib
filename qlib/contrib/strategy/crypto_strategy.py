@@ -97,58 +97,72 @@ class CryptoLongShortStrategy(WeightStrategyBase):
             return {}
 
         # 1. Update Entry Prices for new/existing positions
-        self._update_entry_info(current, trade_start_time)
+        # DEBUG LOGGING TO FILE
+        debug_log_path = "logs/strategy_trace.log"
+        with open(debug_log_path, "a") as f_dbg:
+            f_dbg.write(f"\n--- STEP: {trade_start_time} ---\n")
+            f_dbg.write(f"In Score Size: {len(score)}\n")
+            if not score.empty:
+                f_dbg.write(f"In Score Symbols: {score.index.tolist()}\n")
+                f_dbg.write(f"Target Symbols: {self.target_symbols}\n")
 
-        # 2. Update Prediction History & Calculate Sigma
-        sigmas = {}
-        for inst, val in score.items():
-            if inst not in self.prediction_history:
-                self.prediction_history[inst] = []
-            self.prediction_history[inst].append(val)
-            if len(self.prediction_history[inst]) > self.max_history:
-                self.prediction_history[inst].pop(0)
-            if len(self.prediction_history[inst]) > 5:
-                series = pd.Series(self.prediction_history[inst])
-                std = series.std()
-                mean = series.mean()
-                sigmas[inst] = (val - mean) / std if std > 1e-6 else 0
-            else:
-                sigmas[inst] = 0
+            self._update_entry_info(current, trade_start_time)
 
-        # 3. Process Exits (SL/TP, Trend Reversal, Stagnation, Time)
-        active_exits = self._check_exit_conditions(current, score, sigmas, trade_start_time, trade_end_time)
-        
-        # 4. Filter Potential Entries
-        potential_entries = score.copy()
-        
-        if self.target_symbols is not None:
-            potential_entries = potential_entries[potential_entries.index.isin(self.target_symbols)]
-        
-        # Exclude those already hitting exit this step
-        potential_entries = potential_entries[~potential_entries.index.isin(active_exits)]
-        
-        # Signal Threshold Filtering (Magnitude)
-        if self.signal_threshold > 0:
-            potential_entries = potential_entries[potential_entries.abs() >= self.signal_threshold]
+            # 2. Update Prediction History & Calculate Sigma
+            sigmas = {}
+            for inst, val in score.items():
+                if inst not in self.prediction_history:
+                    self.prediction_history[inst] = []
+                self.prediction_history[inst].append(val)
+                if len(self.prediction_history[inst]) > self.max_history:
+                    self.prediction_history[inst].pop(0)
+                if len(self.prediction_history[inst]) > 5:
+                    series = pd.Series(self.prediction_history[inst])
+                    std = series.std()
+                    mean = series.mean()
+                    sigmas[inst] = (val - mean) / std if std > 1e-6 else 0
+                else:
+                    sigmas[inst] = 0
 
-        # Sigma Threshold Filtering (Relative Confidence)
-        if self.min_sigma_threshold > 0:
-            qualified = []
-            for inst in potential_entries.index:
-                if abs(sigmas.get(inst, 0)) >= self.min_sigma_threshold:
-                    qualified.append(inst)
-            potential_entries = potential_entries[potential_entries.index.isin(qualified)]
+            # 3. Process Exits (SL/TP, Trend Reversal, Stagnation, Time)
+            active_exits = self._check_exit_conditions(current, score, sigmas, trade_start_time, trade_end_time)
+            f_dbg.write(f"Active Exits: {active_exits}\n")
+            
+            # 4. Filter Potential Entries
+            potential_entries = score.copy()
+            
+            if self.target_symbols is not None:
+                potential_entries = potential_entries[potential_entries.index.isin(self.target_symbols)]
+            f_dbg.write(f"Potential after Target Match: {len(potential_entries)}\n")
+            
+            # Exclude those already hitting exit this step
+            potential_entries = potential_entries[~potential_entries.index.isin(active_exits)]
+            
+            # Signal Threshold Filtering (Magnitude)
+            if self.signal_threshold > 0:
+                potential_entries = potential_entries[potential_entries.abs() >= self.signal_threshold]
+            f_dbg.write(f"Potential after Threshold ({self.signal_threshold}): {len(potential_entries)}\n")
 
-        # 5. Determine Selection & Ranking
-        ranking_score = potential_entries.abs().sort_values(ascending=False)
-        target_weights = {}
-        
-        if self.direction == "long":
-            eligible_idx = ranking_score[potential_entries[ranking_score.index] > 0].head(self.topk).index
-        elif self.direction == "short":
-            eligible_idx = ranking_score[potential_entries[ranking_score.index] < 0].head(self.topk).index
-        else: # long-short
-            eligible_idx = ranking_score.head(self.topk).index
+            # Sigma Threshold Filtering (Relative Confidence)
+            if self.min_sigma_threshold > 0:
+                qualified = []
+                for inst in potential_entries.index:
+                    if abs(sigmas.get(inst, 0)) >= self.min_sigma_threshold:
+                        qualified.append(inst)
+                potential_entries = potential_entries[potential_entries.index.isin(qualified)]
+            f_dbg.write(f"Potential after Sigma: {len(potential_entries)}\n")
+
+            # 5. Determine Selection & Ranking
+            ranking_score = potential_entries.abs().sort_values(ascending=False)
+            target_weights = {}
+            
+            if self.direction == "long":
+                eligible_idx = ranking_score[potential_entries[ranking_score.index] > 0].head(self.topk).index
+            elif self.direction == "short":
+                eligible_idx = ranking_score[potential_entries[ranking_score.index] < 0].head(self.topk).index
+            else: # long-short
+                eligible_idx = ranking_score.head(self.topk).index
+            f_dbg.write(f"Eligible Index: {eligible_idx.tolist()}\n")
 
         # 6. Generate weights for Entries & Maintains
         # Current holdings not in active_exits should be maintained if they still meet basic criteria

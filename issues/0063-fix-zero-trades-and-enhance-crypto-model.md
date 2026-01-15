@@ -35,11 +35,16 @@ During the hyperparameter tuning and model evaluation process for the crypto pla
 ### 4. Infrastructure Fixes
 - **Calendar Mocking**: Created `240min_future.txt` in the calendars directory to suppress warnings when Qlib looks for future timestamps during prediction.
 
+### 5. MultiIndex Consistency FIX
+- **Bug Discovery**: Found that merging funding rate features caused the MultiIndex to swap to `(datetime, instrument)`, while Qlib components expect `(instrument, datetime)`.
+- **Symptoms**: Strategies were unable to find scores for any instrument, resulting in consistent Zero Trades.
+- **Fix**: Added explicit `swaplevel().sort_index()` in `CryptoAlpha158WithFunding.fetch`.
+
 ## Verification
 - **Unit Test**: `tests/test_crypto_handler.py` verified the 535-dimension hybrid feature output.
-- **Integration Test**: `tests/test_logging_multiprocess.py` verified correct grouping and naming of subprocess logs.
-- **Tuning Run**: Executed a sample tuning run (`scripts/tune_hyperparameters.py`) which successfully completed training and backtesting with non-zero scores and consolidated logs.
+- **Index Order Check**: Verified via `tmp/debug_pred.txt` that predictions now follow the correct `(instrument, datetime)` order.
+- **Tuning Run**: Trial 17 achieved a WPS score of **2.15** with valid trades.
 
-## Status: CLOSED
-- Date: 2026-01-14
-- Result: Model tuning pipeline is stable, feature-rich, and producing valid backtest signals.
+## Status: IN_PROGRESS
+- Re-opened on 2026-01-14 to perform final full-period backtest validation with the index fix.
+- Best ETHUSDT params identified.
