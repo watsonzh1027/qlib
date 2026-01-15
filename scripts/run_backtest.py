@@ -17,13 +17,16 @@ from qlib.utils.logging_config import setup_logging
 # Configure logging
 logger = setup_logging()
 
+# Add project root to sys.path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 # Add mapping logic (duplicate)
 def map_symbol(symbol):
     symbol = symbol.upper()
-    if "_" not in symbol:
-        if symbol.endswith("USDT"):
-            coin = symbol[:-4]
-            return f"{coin}_USDT_4H_FUTURE"
+    if "/" in symbol:
+        return symbol.split("/")[0]
+    if "_" not in symbol and symbol.endswith("USDT"):
+        return f"{symbol[:-4]}_USDT"
     return symbol
 
 def main():
@@ -33,12 +36,29 @@ def main():
     parser.add_argument("--end")
     args, unknown = parser.parse_known_args()
 
-    config_path = Path(args.config)
-    with open(config_path, "r") as f:
-        config = json.load(f)
+    # config_path = Path(args.config)
+    # with open(config_path, "r") as f:
+    #     config = json.load(f)
+
+    from scripts.config_manager import ConfigManager
+    cm = ConfigManager(args.config)
+    config = cm.config
+    
+    # Overwrite with resolved
+    config["data_handler_config"] = cm.get_data_handler_config()
+    config["dataset"] = cm.get_dataset_config()
+    config["backtest"] = cm.get_backtest_config() # Important for backtest params
+    config["port_analysis"] = cm.get_port_analysis_config()
+    
+    config_path = Path(args.config) # Keep for model path logic below
 
     provider_uri = config.get("data", {}).get("bin_data_dir", "data/qlib_data/crypto")
     qlib.init(provider_uri=provider_uri, region=REG_CN)
+    
+    # Get freq from resolved workflow config
+    raw_freq = cm.get_workflow_config()["frequency"]
+    if not raw_freq:
+         raw_freq = config.get("data_collection", {}).get("interval", "60min")
 
     # Load Model
     model_path = Path("tmp/tuning") / f"{config_path.stem}.pkl"
@@ -60,7 +80,7 @@ def main():
         "instruments": instruments,
         "infer_processors": [],
         "learn_processors": [],
-        "freq": "240min"
+        "freq": raw_freq
     }
     
     # Load handler config
@@ -90,56 +110,60 @@ def main():
         pred = pred.iloc[:, 0]
         
     # Prepare Strategy
-    trading_cfg = config.get("trading", {})
-    backtest_cfg = config.get("backtest", {})
-    
-    # Map 'threshold' -> 'signal_threshold'
-    signal_thresh = trading_cfg.get("signal_threshold", 0.0)
-    
-    # Prepare Strategy configuration moves down
-    
-    strategy_config = {
-        "class": "CryptoLongShortStrategy",
-        "module_path": "qlib.contrib.strategy",
-        "kwargs": {
-            "signal": pred,
-            "signal_threshold": signal_thresh,
-            "leverage": trading_cfg.get("leverage", 1.0),
-            "topk": backtest_cfg.get("topk", 1),
-            "stop_loss": trading_cfg.get("stop_loss", -0.05),
-            "take_profit": trading_cfg.get("take_profit", 0.1),
-            "direction": "long-short",
-            "target_symbols": instruments # Important for the strategy!
-        }
-    }
+    if "strategy" in config:
+        # Use top-level strategy config if available (user preference)
+        raw_strategy_cfg = config["strategy"]
+    else:
+        # Fallback to port_analysis strategy
+        raw_strategy_cfg = config.get("port_analysis", {}).get("strategy", {})
 
-    # Prepare Executor
-    executor_config = {
-        "class": "SimulatorExecutor",
-        "module_path": "qlib.backtest.executor",
-        "kwargs": {
-            "time_per_step": "240min",
-            "generate_portfolio_metrics": True,
-            "verbose": True
-        }
+    # Adapt flat structure to standard Qlib config (class, module_path, kwargs)
+    # The user's top-level config is flat, Qlib expects kwargs
+    strategy_config = {
+        "class": raw_strategy_cfg.get("class", "CryptoLongShortStrategy"),
+        "module_path": raw_strategy_cfg.get("module_path", "qlib.contrib.strategy"),
+        "kwargs": {}
     }
+    
+    # If the config already has kwargs, start with that. Otherwise, use the whole dict as kwargs source
+    source_kwargs = raw_strategy_cfg.get("kwargs", raw_strategy_cfg)
+    
+    # Copy all params that are NOT class/module_path/kwargs into the new kwargs
+    for k, v in source_kwargs.items():
+        if k not in ["class", "module_path", "kwargs"]:
+            strategy_config["kwargs"][k] = v
+            
+    # Inject dynamic parameters
+    strategy_config["kwargs"]["signal"] = pred
+    # strategy_config["kwargs"]["target_symbols"] = instruments # Not strictly needed if signal covers it, but good for safety
+    
+    # Prepare Executor
+    raw_executor_cfg = config.get("port_analysis", {}).get("executor", {})
+    executor_config = {
+        "class": raw_executor_cfg.get("class", "SimulatorExecutor"),
+        "module_path": raw_executor_cfg.get("module_path", "qlib.backtest.executor"),
+        "kwargs": raw_executor_cfg.get("kwargs", {})
+    }
+    # Ensure time_per_step matches runtime freq
+    executor_config["kwargs"]["time_per_step"] = raw_freq
+    executor_config["kwargs"]["generate_portfolio_metrics"] = True
+    executor_config["kwargs"]["verbose"] = True
 
     # Run Backtest
     # Need to construct Backtest Config
-    # exchange_kwargs
-    exchange_kwargs = {
-        "freq": "240min",
+    raw_exchange_kwargs = config.get("backtest", {}).get("exchange_kwargs", {})
+    
+    exchange_kwargs = raw_exchange_kwargs.copy()
+    
+    # Override with runtime args
+    exchange_kwargs.update({
+        "freq": raw_freq,
         "start_time": args.start,
         "end_time": args.end,
-        "limit_threshold": None,
-        "deal_price": "close",
-        "open_cost": 0.0001,
-        "close_cost": 0.0001,
-        "min_cost": 0.0,
-        "trade_unit": None
-    }
+    })
 
-    exchange_kwargs["codes"] = list(pred.index.get_level_values("instrument").unique())
+    if "codes" not in exchange_kwargs:
+         exchange_kwargs["codes"] = list(pred.index.get_level_values("instrument").unique())
 
     portfolio_metric_dict, indicator_dict = backtest(
         start_time=args.start,
@@ -152,25 +176,12 @@ def main():
     )
 
     # Analysis
-    # We need to print metrics for `tune_hyperparameters.py` to parse.
-    # Metrics: Sharpe Ratio, Annualized Return, Max Drawdown
-    
-    # portfolio_metric_dict contains return, cost, turnover etc.
-    # But usually we need `analysis_model.metrics`.
-    
-    # However, `backtest` returns (portfolio_metrics, indicator_metrics)
-    # portfolio_metrics is a DataFrame of daily/step metrics.
-    # We can calculate Sharpe from it.
-    
-    # Actually, let's use `qlib.contrib.evaluate.risk_analysis` if available, or just manual calculation.
-    # `portfolio_metric_dict` is the raw metrics dataframe.
-    
     metrics_df = portfolio_metric_dict
     
     # Handle dict return from backtest (keyed by frequency)
     if isinstance(metrics_df, dict):
-        if "240min" in metrics_df:
-            metrics_df = metrics_df["240min"]
+        if raw_freq in metrics_df:
+            metrics_df = metrics_df[raw_freq]
         elif "1day" in metrics_df:
             metrics_df = metrics_df["1day"]
         elif len(metrics_df) > 0:
@@ -182,10 +193,6 @@ def main():
         metrics_df = metrics_df[0]
             
     # Calculate Sharpe
-    # returns are in 'return' column?
-    # Actually SimulatorExecutor returns DataFrame with columns like 'return', 'cost', 'bench', 'turnover'.
-    
-    # Simple calculation
     returns = metrics_df["return"]
     
     if returns.empty or returns.std() == 0:
@@ -194,10 +201,18 @@ def main():
          mdd = 0
          win_rate = 0
     else:
-        # Annualize factor for 4h (6 steps/day * 365) = 2190
-        ann_scaler = 2190
-        # Wait, if `time_per_step` is 240min, `returns` are per 4h.
-        
+        # Calculate annular scaler based on freq
+        if "min" in raw_freq:
+            mins = int(raw_freq.replace("min", ""))
+            ann_scaler = (60 / mins) * 24 * 365
+        elif "h" in raw_freq:
+             hours = int(raw_freq.replace("h", ""))
+             ann_scaler = (24 / hours) * 365
+        elif "d" in raw_freq:
+            ann_scaler = 252 # traditional markets or 365 for crypto
+        else:
+            ann_scaler = 252 # Default
+            
         sharpe = returns.mean() / returns.std() * (ann_scaler ** 0.5)
         ann_ret = returns.mean() * ann_scaler
         
@@ -209,20 +224,12 @@ def main():
         
         win_rate = (returns > 0).mean()
         
-    # Print in format expected by parsing regex
-    # Sharpe Ratio: 1.5
-    # Annualized Return: 20.5%
-    # Max Drawdown: 10.2%
-    # Win Rate: 55.0%
-    # Total Trades: ... (Hard to get exactly from metrics DF without transaction log, but tuner parses it if present)
-    
     print(f"Sharpe Ratio: {sharpe:.4f}")
     print(f"Annualized Return: {ann_ret*100:.2f}%")
     print(f"Max Drawdown: {mdd*100:.2f}%")
     print(f"Win Rate: {win_rate*100:.2f}%")
 
     # Calculate Total Trades based on turnover
-    # Turnover > 0 implies trading activity occurred
     if "turnover" in metrics_df.columns:
         total_trades = (metrics_df["turnover"] > 1e-6).sum()
     else:

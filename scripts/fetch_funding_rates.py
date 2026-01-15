@@ -172,9 +172,13 @@ def merge_funding_rate_with_ohlcv(ohlcv_file, funding_rate_file, output_file=Non
     # Normalize date column name
     if 'date' in ohlcv.columns:
         ohlcv['datetime'] = pd.to_datetime(ohlcv['date'])
+        
+    if 'funding_rate' in ohlcv.columns:
+        ohlcv = ohlcv.drop(columns=['funding_rate'])
     
     funding = pd.read_csv(funding_rate_file, parse_dates=['timestamp'])
-    funding = funding.rename(columns={'timestamp': 'datetime'})
+    # Avoid duplicate 'datetime' columns if one already exists
+    funding = funding[['timestamp', 'funding_rate']].rename(columns={'timestamp': 'datetime'})
     
     # Use merge_asof
     merged = pd.merge_asof(

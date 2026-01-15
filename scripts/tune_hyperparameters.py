@@ -233,6 +233,20 @@ def objective(trial, model_type, folds, base_config, symbol):
     trial_config["trading"]["stop_loss"] = risk_params["stop_loss"]
     trial_config["trading"]["take_profit"] = risk_params["take_profit"]
     trial_config["trading"]["min_sigma_threshold"] = risk_params["min_sigma"]
+
+    # Also update 'strategy' section if it exists (for compatibility with run_backtest.py refactor)
+    if "strategy" not in trial_config: 
+        trial_config["strategy"] = {}
+        
+    # We update the strategy config with the tuned parameters
+    # Note: CryptoLongShortStrategy uses flat kwargs in the JSON provided by user
+    trial_config["strategy"]["leverage"] = strat_params["leverage"]
+    trial_config["strategy"]["signal_threshold"] = strat_params["threshold"]
+    trial_config["strategy"]["stop_loss"] = risk_params["stop_loss"]
+    trial_config["strategy"]["take_profit"] = risk_params["take_profit"]
+    trial_config["strategy"]["min_sigma_threshold"] = risk_params["min_sigma"]
+    # Topk is usually in backtest or strategy, update both
+    trial_config["strategy"]["topk"] = strat_params["topk"]
     
     save_config(trial_config, trial_config_path)
     

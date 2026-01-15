@@ -309,6 +309,12 @@ class ConfigManager:
                     return self.get_trading_config().get("close_cost", 0.001)
                 elif obj == "<trading.min_cost>":
                     return self.get_trading_config().get("min_cost", 0.001)
+                elif obj == "<workflow.frequency>":
+                    freq = self.get_workflow_config()["frequency"]
+                    return self._convert_ccxt_freq_to_qlib(freq)
+                elif obj == "<data.symbols>":
+                     ccxt_symbols = self.get_crypto_symbols()
+                     return [symbol.replace('/', '') for symbol in ccxt_symbols]
                 else:
                     return obj
             elif isinstance(obj, dict):

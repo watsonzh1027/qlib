@@ -16,14 +16,16 @@ from qlib.utils.logging_config import setup_logging
 # Configure logging
 logger = setup_logging()
 
+# Add project root to sys.path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 # Add mapping logic
 def map_symbol(symbol):
     symbol = symbol.upper()
-    if "_" not in symbol:
-        # Assume format like BTCUSDT -> BTC_USDT_4H_FUTURE
-        if symbol.endswith("USDT"):
-            coin = symbol[:-4]
-            return f"{coin}_USDT_4H_FUTURE"
+    if "/" in symbol:
+        return symbol.split("/")[0]
+    if "_" not in symbol and symbol.endswith("USDT"):
+        return f"{symbol[:-4]}_USDT"
     return symbol
 
 def main():
@@ -37,23 +39,35 @@ def main():
     parser.add_argument("--embedding", action="store_true") # Ignored for now
     args, unknown = parser.parse_known_args()
 
-    config_path = Path(args.config)
-    with open(config_path, "r") as f:
-        config = json.load(f)
-
+    # config_path = Path(args.config)
+    # with open(config_path, "r") as f:
+    #     config = json.load(f)
+    
+    from scripts.config_manager import ConfigManager
+    cm = ConfigManager(args.config)
+    config = cm.config # Access raw config for unsupported sections, but...
+    
+    # We want resolved values for critical dynamic sections
+    # Overwrite raw sections with resolved ones where ConfigManager supports it
+    config["data_handler_config"] = cm.get_data_handler_config()
+    config["dataset"] = cm.get_dataset_config()
+    
     # Init Qlib
     provider_uri = config.get("data", {}).get("bin_data_dir", "data/qlib_data/crypto")
     qlib.init(provider_uri=provider_uri, region=REG_CN)
 
     # Prepare Data Handler Config
-    # We need to construct a standard Qlib DataHandler config
     # The symbol is in config["training"]["instruments"] (list)
     raw_symbols = config.get("training", {}).get("instruments", [])
     instruments = [map_symbol(s) for s in raw_symbols]
     
-    # Check if instruments exist
-    # If not, maybe use 'crypto_4h' or similar
-    
+    # Get freq from resolved workflow config to ensure consistency
+    # Note: ConfigManager resolves <workflow.frequency> to something like "240min"
+    raw_freq = cm.get_workflow_config()["frequency"]
+    # Fallback to data_collection if workflow freq is missing (unlikely if valid)
+    if not raw_freq:
+         raw_freq = config.get("data_collection", {}).get("interval", "60min")
+
     dh_config = {
         "start_time": args.train_start,
         "end_time": args.valid_end,
@@ -62,7 +76,7 @@ def main():
         "instruments": instruments,
         "infer_processors": [],
         "learn_processors": [],
-        "freq": "240min"  # Force 4h
+        "freq": raw_freq
     }
     
     # Try to load handler config from config
@@ -130,6 +144,7 @@ def main():
     
     # We'll save the model object to a pickle file.
     # File name: tmp/tuning/{config_name}_model.pkl
+    config_path = Path(args.config)
     model_path = Path("tmp/tuning") / f"{config_path.stem}.pkl"
     with open(model_path, "wb") as f:
         pickle.dump(model, f)

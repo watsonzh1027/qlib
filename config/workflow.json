@@ -7,14 +7,14 @@
     "max_index": 9
   },
   "data": {
-    "csv_data_dir": "data/raw/crypto",
-    "normalize_dir": "data/nor/crypto",
+    "csv_data_dir": "data/klines",
+    "normalize_dir": "data/normalize",
     "bin_data_dir": "data/qlib_data/crypto",
     "market_type": "future",
-    "symbols": "config/top50_symbols.json"
+    "symbols": "config/instruments.json"
   },
   "data_collection": {
-    "interval": "60min",
+    "interval": "1h",
     "api_timeout": 10,
     "start_time": "2020-01-01",
     "end_time": "",
@@ -32,7 +32,7 @@
     "use_db": true
   },
   "data_convertor": {
-    "date_field_name": "date",
+    "date_field_name": "timestamp",
     "include_fields": [
       "open",
       "high",
@@ -45,7 +45,7 @@
     "data_source": "db"
   },
   "workflow": {
-    "start_time": "2024-01-01",
+    "start_time": "2023-01-01",
     "end_time": "",
     "frequency": "240min",
     "instruments_limit": 50
@@ -56,7 +56,7 @@
     "account": 1000000,
     "benchmark": null,
     "exchange_kwargs": {
-      "freq": "240min",
+      "freq": "<workflow.frequency>",
       "limit_threshold": null,
       "deal_price": "close",
       "open_cost": 0.001,
@@ -93,9 +93,9 @@
       "start_time": "<workflow.start_time>",
       "end_time": "2026-01-01",
       "instruments": "<data.symbols>",
-      "freq": "240min",
+      "freq": "<workflow.frequency>",
       "fit_start_time": "<workflow.start_time>",
-      "fit_end_time": "2024-12-31",
+      "fit_end_time": "2023-12-31",
       "infer_processors": [],
       "learn_processors": []
     }
@@ -162,6 +162,16 @@
       }
     }
   },
+  "strategy": {
+    "class": "CryptoLongShortStrategy",
+    "module_path": "qlib.contrib.strategy.crypto_strategy",
+    "direction": "long-short",
+    "leverage": 1.0,
+    "take_profit": 0.2727057088803897,
+    "stop_loss": -0.05078613412431277,
+    "signal_threshold": 0.0,
+    "min_sigma_threshold": 1.0
+  },
   "dataset": {
     "class": "DatasetH",
     "module_path": "qlib.data.dataset",
@@ -183,7 +193,7 @@
       "class": "SimulatorExecutor",
       "module_path": "qlib.backtest.executor",
       "kwargs": {
-        "time_per_step": "240min",
+        "time_per_step": "<workflow.frequency>",
         "generate_portfolio_metrics": true
       }
     },
@@ -196,7 +206,7 @@
         "leverage": 2.0,
         "take_profit": 0.08,
         "stop_loss": -0.04,
-        "max_drawdown_limit": 0.20,
+        "max_drawdown_limit": 0.2,
         "topk": 1
       }
     },
@@ -206,6 +216,25 @@
       "account": "<backtest.account>",
       "benchmark": null,
       "exchange_kwargs": "<backtest.exchange_kwargs>"
+    }
+  },
+  "per_symbol_models": {
+    "ETH_USDT_4H_FUTURE": {
+      "model_type": "lightgbm",
+      "model_params": {
+        "learning_rate": 0.0478428112275472,
+        "num_leaves": 20,
+        "lambda_l2": 9.644762983505155,
+        "max_depth": 9
+      },
+      "trading": {
+        "leverage": 2,
+        "signal_threshold": 3.831250108791326e-05,
+        "stop_loss": -0.024800292670889665,
+        "take_profit": 0.16596496376689146,
+        "min_sigma_threshold": 0.4703485686026834
+      },
+      "backtest_topk": 3
     }
   }
 }
