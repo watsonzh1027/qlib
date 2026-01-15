@@ -21,7 +21,7 @@ sys.path.insert(0, str(CUR_DIR)) # For BaseRun's importlib.import_module("collec
 from data_collector.base import BaseCollector, BaseNormalize, BaseRun
 from data_collector.utils import deco_retry
 from qlib.utils import code_to_fname
-from scripts.symbol_utils import normalize_symbols_list
+from scripts.symbol_utils import normalize_symbols_list, get_data_path, normalize_symbol as norm_sym, get_ccxt_symbol
 
 import ccxt
 from time import mktime
@@ -177,26 +177,41 @@ class CryptoCollector(BaseCollector):
     def get_instrument_list(self):
         logger.info("get okx crypto symbols......")
         symbols = get_cg_crypto_symbols(symbol_file=self.symbol_file)
+        
+        # Rewrite hierarchical symbols to match current collection parameters
+        # This prevents confusion like showing /240min/ when /1h/ is requested
+        aligned_symbols = []
+        for s in symbols:
+            parts = s.split('/')
+            if len(parts) == 3:
+                # Update interval and market_type to match current Run instance
+                parts[1] = self.interval
+                parts[2] = self.market_type.upper()
+                aligned_symbols.append('/'.join(parts))
+            else:
+                aligned_symbols.append(s)
+        
+        symbols = sorted(set(aligned_symbols))
         logger.info(f"get {len(symbols)} symbols.")
         return symbols
 
     def normalize_symbol(self, symbol):
-        sym = symbol.replace("/", "_")
-        return f"{sym}_{self.interval}_{self.market_type}"
+        return norm_sym(symbol.split('/')[0])
 
     def save_instrument(self, symbol, df: pd.DataFrame):
-        """save instrument data to file with custom formatting"""
+        """save instrument data to file with hierarchical directory structure"""
+        symbol = self.normalize_symbol(symbol)
         if df is None or df.empty:
             logger.warning(f"{symbol} is empty")
             return
 
-        # 1. Generate filename using the custom naming convention
-        filename_base = self.normalize_symbol(symbol)
-        filename_base = code_to_fname(filename_base)
-        instrument_path = self.save_dir.joinpath(f"{filename_base}.csv")
+        # 1. Generate path using the hierarchical naming convention
+        # Root is self.save_dir
+        instrument_path = Path(get_data_path(str(self.save_dir), symbol, self.interval, self.market_type))
+        instrument_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 2. Set 'symbol' column to a clean format (e.g., BTC_USDT)
-        clean_symbol = symbol.replace("/", "_")
+        clean_symbol = norm_sym(symbol)
         df["symbol"] = clean_symbol
 
         # 3. Remove redundant 'timestamp' if 'date' is present
@@ -222,6 +237,7 @@ class CryptoCollector(BaseCollector):
 
         # 7. Save to CSV
         df.to_csv(instrument_path, index=False)
+        logger.debug(f"Saved {symbol} to {instrument_path}")
 
     @staticmethod
     def get_data_from_remote(symbol, interval, start, end, market_type="spot", limit=100):
@@ -243,6 +259,7 @@ class CryptoCollector(BaseCollector):
             
             # Use market_type in options
             cg = ccxt.okx({'options': {'defaultType': market_type}})
+            ccxt_symbol = get_ccxt_symbol(symbol)
             
             start_ts = int(pd.Timestamp(start).timestamp() * 1000)
             end_ts = int(pd.Timestamp(end).timestamp() * 1000)
@@ -251,9 +268,19 @@ class CryptoCollector(BaseCollector):
             since = start_ts
             
             while since < end_ts:
-                ohlcv = cg.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+                ohlcv = cg.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, since=since, limit=limit, params={'endTime': end_ts})
                 if not ohlcv:
-                    break
+                    if not all_data:
+                        # If no data found yet, 'since' might be before listing. 
+                        # Jump forward 180 days (approx 6 months) to search for the start of history faster.
+                        last_since = since
+                        since += 180 * 24 * 60 * 60 * 1000
+                        logger.debug(f"No data for {symbol} at {pd.to_datetime(last_since, unit='ms')}, jumping to {pd.to_datetime(since, unit='ms')}...")
+                        if since >= end_ts:
+                            break
+                        continue
+                    else:
+                        break
                 all_data.extend(ohlcv)
                 # update since
                 last_ts = ohlcv[-1][0]
@@ -292,64 +319,16 @@ class CryptoCollector(BaseCollector):
     ) -> pd.DataFrame:
         """
         Fetch data for the given symbol and interval. 
-        If interval > 1min, download 1min data and resample for accurate VWAP.
         """
-        requested_interval = interval
-        base_interval = "1min"
-
-        def _fetch(freq, start, end):
-            self.sleep()
-            return self.get_data_from_remote(
-                symbol,
-                interval=freq,
-                start=start,
-                end=end,
-                market_type=self.market_type,
-                limit=self.limit,
-            )
-
-        if requested_interval == base_interval:
-            return _fetch(base_interval, start_datetime, end_datetime)
-
-        # For higher intervals, try to fetch 1min data and resample
-        logger.info(f"Attempting to fetch 1min data for resampling: {symbol}...")
-        df = _fetch(base_interval, start_datetime, end_datetime)
-
-        if df is None or df.empty or len(df) < 10: 
-            logger.info(f"Fallback: Fetching {requested_interval} directly for {symbol}")
-            return _fetch(requested_interval, start_datetime, end_datetime)
-
-        logger.info(f"Resampling 1min data to {requested_interval} for {symbol}")
-
-        # Resample logic
-        df["date"] = pd.to_datetime(df["date"])
-        df.set_index("date", inplace=True)
-        
-        # Mapping Qlib interval to Pandas freq
-        freq_map = {"1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w", "15min": "15min", "30min": "30min", "5min": "5min"}
-        pandas_freq = freq_map.get(requested_interval, requested_interval)
-
-        # Resample OHLC
-        resampled = df.resample(pandas_freq).agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum", # This is the sum of scaled USDT volumes
-        })
-
-        # Calculate accurate VWAP: Sum(Price * Vol) / Sum(Vol)
-        # Note: In our system, 'volume' is already (Price * CoinVol) / 1000
-        # So Sum(volume) = Sum(Price * CoinVol) / 1000
-        # We need CoinVol to weight properly. 
-        # CoinVol_i = (volume_i * 1000) / vwap_i
-        df["coin_vol"] = (df["volume"] * 1000.0) / df["vwap"]
-        vwap_resampled = (df["volume"].resample(pandas_freq).sum() * 1000.0) / df["coin_vol"].resample(pandas_freq).sum()
-        
-        resampled["vwap"] = vwap_resampled
-        resampled = resampled.dropna(subset=["open"]) # Remove empty bars
-        
-        return resampled.reset_index()
+        self.sleep()
+        return self.get_data_from_remote(
+            symbol,
+            interval=interval,
+            start=start_datetime,
+            end=end_datetime,
+            market_type=self.market_type,
+            limit=self.limit,
+        )
 
 
 # Keep these for backward compatibility
@@ -403,7 +382,7 @@ CryptoNormalize1min = CryptoNormalize
 
 
 class Run:
-    def __init__(self, source_dir=None, normalize_dir=None, max_workers=1, interval="1d", config_path="config/workflow.json"):
+    def __init__(self, source_dir=None, normalize_dir=None, max_workers=1, interval="1d", config_path="config/workflow.json", limit=None, market_type=None):
         """
         Crypto Data Collector CLI.
 
@@ -420,11 +399,15 @@ class Run:
           --normalize_dir Directory for normalize data.
           --max_workers   Concurrent number (default: 1).
           --interval      Frequency (1min, 1h, 1d, etc.)
+          --limit         Batch size for CCXT fetch_ohlcv (default: 100).
+          --market_type   'spot' or 'future' (default: 'spot').
         """
         self._source_dir_arg = source_dir
         self._normalize_dir_arg = normalize_dir
         self._max_workers_arg = max_workers
         self._interval_arg = interval
+        self._limit_arg = limit
+        self._market_type_arg = market_type
         self.config_path = config_path
         self._prepared = False
 
@@ -448,8 +431,13 @@ class Run:
         self.normalize_dir = Path(self.normalize_dir).expanduser().resolve()
         self.normalize_dir.mkdir(parents=True, exist_ok=True)
 
-        self.market_type = config.get("data", {}).get("market_type", "spot")
-        self.limit = config.get("data_collection", {}).get("limit", 100)
+        self.market_type = self._market_type_arg
+        if self.market_type is None:
+            self.market_type = config.get("data", {}).get("market_type", "spot")
+
+        self.limit = self._limit_arg
+        if self.limit is None:
+            self.limit = config.get("data_collection", {}).get("limit", 100)
 
         # Resolve interval
         self.interval = self._interval_arg
@@ -459,6 +447,18 @@ class Run:
              
         self.max_workers = self._max_workers_arg
         self._prepared = True
+
+    @property
+    def collector_class_name(self):
+        return "CryptoCollector"
+
+    @property
+    def normalize_class_name(self):
+        return "CryptoNormalize"
+
+    @property
+    def default_base_dir(self) -> Path:
+        return CUR_DIR
 
     def download(
         self,
@@ -498,6 +498,19 @@ class Run:
             limit=self.limit,
         ).collector_data()
 
+        print("\n" + "=" * 80)
+        print("Data collection complete. Next steps:")
+        print("=" * 80)
+        # Suggest the generic batch command instead of per-symbol instructions
+        print("1. Fetch and merge funding rates (Batch Process):")
+        print(f"   python scripts/fetch_funding_rates.py --all --config {self.config_path}")
+        
+        print("\n2. Normalize data:")
+        print(f"   python scripts/data_collector/crypto/collector.py normalize -c {self.config_path}")
+        print("\n3. Dump to Qlib binary format:")
+        print(f"   python scripts/dump_bin.py dump_all --data_path {self.normalize_dir} --qlib_dir data/qlib_data/crypto --freq {self.interval} --date_field_name date")
+        print("=" * 80 + "\n")
+
     def normalize(self, date_field_name: str = "date", symbol_field_name: str = "symbol", **kwargs):
         """normalize data"""
         self._prepare_conf()
@@ -512,6 +525,19 @@ class Run:
             **kwargs,
         )
         yc.normalize()
+
+        qlib_dir = self._config_manager.get("data", "bin_data_dir") or "data/qlib_data/crypto"
+
+        print("\n" + "=" * 80)
+        print("Normalization complete. Next steps:")
+        print("=" * 80)
+        print("1. Dump to Qlib binary format:")
+        print(f"   python scripts/dump_bin.py dump_all --data_path {self.normalize_dir} --qlib_dir {qlib_dir} --freq {self.interval} --date_field_name date")
+        print("\n2. Tune Hyperparameters (Optional):")
+        print(f"   python scripts/tune_hyperparameters.py")
+        print("\n3. Train Sample Model:")
+        print(f"   python scripts/train_sample_model.py")
+        print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":

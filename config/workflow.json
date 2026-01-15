@@ -7,14 +7,14 @@
     "max_index": 9
   },
   "data": {
-    "csv_data_dir": "data/klines",
-    "normalize_dir": "data/normalize",
+    "csv_data_dir": "data/raw/crypto",
+    "normalize_dir": "data/nor/crypto",
     "bin_data_dir": "data/qlib_data/crypto",
     "market_type": "future",
-    "symbols": "config/instruments.json"
+    "symbols": "config/top50_symbols.json"
   },
   "data_collection": {
-    "interval": "1h",
+    "interval": "60min",
     "api_timeout": 10,
     "start_time": "2020-01-01",
     "end_time": "",
@@ -32,7 +32,7 @@
     "use_db": true
   },
   "data_convertor": {
-    "date_field_name": "timestamp",
+    "date_field_name": "date",
     "include_fields": [
       "open",
       "high",
@@ -45,9 +45,9 @@
     "data_source": "db"
   },
   "workflow": {
-    "start_time": "2023-01-01",
+    "start_time": "2024-01-01",
     "end_time": "",
-    "frequency": "4h",
+    "frequency": "240min",
     "instruments_limit": 50
   },
   "backtest": {
@@ -56,7 +56,7 @@
     "account": 1000000,
     "benchmark": null,
     "exchange_kwargs": {
-      "freq": "4h",
+      "freq": "240min",
       "limit_threshold": null,
       "deal_price": "close",
       "open_cost": 0.001,
@@ -93,9 +93,9 @@
       "start_time": "<workflow.start_time>",
       "end_time": "2026-01-01",
       "instruments": "<data.symbols>",
-      "freq": "4h",
+      "freq": "240min",
       "fit_start_time": "<workflow.start_time>",
-      "fit_end_time": "2023-12-31",
+      "fit_end_time": "2024-12-31",
       "infer_processors": [],
       "learn_processors": []
     }
@@ -183,7 +183,7 @@
       "class": "SimulatorExecutor",
       "module_path": "qlib.backtest.executor",
       "kwargs": {
-        "time_per_step": "4h",
+        "time_per_step": "240min",
         "generate_portfolio_metrics": true
       }
     },

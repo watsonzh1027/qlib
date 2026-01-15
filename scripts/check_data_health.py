@@ -60,8 +60,7 @@ class DataHealthChecker:
                     "$close": "close",
                     "$low": "low",
                     "$high": "high",
-                    "$volume": "volume",
-                    "$factor": "factor",
+                    "$volume": "volume" 
                 },
                 inplace=True,
             )
@@ -144,43 +143,15 @@ class DataHealthChecker:
         else:
             logger.info(f"✅ The columns (OLHCV) are complete and not missing.")
             return None
-
-    def check_missing_factor(self) -> Optional[pd.DataFrame]:
-        """Check if the 'factor' column is missing in the DataFrame."""
-        result_dict = {
-            "instruments": [],
-            "missing_factor_col": [],
-            "missing_factor_data": [],
-        }
-        for filename, df in self.data.items():
-            if "000300" in filename or "000903" in filename or "000905" in filename:
-                continue
-            if "factor" not in df.columns:
-                result_dict["instruments"].append(filename)
-                result_dict["missing_factor_col"].append(True)
-                result_dict["missing_factor_data"].append(False)
-            elif df["factor"].isnull().all():
-                result_dict["instruments"].append(filename)
-                result_dict["missing_factor_col"].append(False)
-                result_dict["missing_factor_data"].append(True)
-
-        result_df = pd.DataFrame(result_dict).set_index("instruments")
-        if not result_df.empty:
-            return result_df
-        else:
-            logger.info(f"✅ The `factor` column already exists and is not empty.")
-            return None
-
+ 
     def check_data(self):
         check_missing_data_result = self.check_missing_data()
         check_large_step_changes_result = self.check_large_step_changes()
-        check_required_columns_result = self.check_required_columns()
-        check_missing_factor_result = self.check_missing_factor()
+        check_required_columns_result = self.check_required_columns() 
         if (
             check_large_step_changes_result is not None
             or check_large_step_changes_result is not None
-            or check_required_columns_result is not None
-            or check_missing_factor_result is not None
+            or check_required_columns_result is not None 
         ):
             print(f"\nSummary of data health check ({len(self.data)} files checked):")
             print("-------------------------------------------------")
@@ -192,10 +163,7 @@ class DataHealthChecker:
                 print(check_large_step_changes_result)
             if isinstance(check_required_columns_result, pd.DataFrame):
                 logger.warning(f"Columns (OLHCV) are missing.")
-                print(check_required_columns_result)
-            if isinstance(check_missing_factor_result, pd.DataFrame):
-                logger.warning(f"The factor column does not exist or is empty")
-                print(check_missing_factor_result)
+                print(check_required_columns_result) 
 
 
 if __name__ == "__main__":

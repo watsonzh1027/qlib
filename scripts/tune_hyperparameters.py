@@ -204,12 +204,14 @@ def objective(trial, model_type, folds, base_config, symbol):
     strat_params["leverage"] = trial.suggest_int("leverage", 1, 3)
     strat_params["threshold"] = trial.suggest_float("threshold", 0.0, 0.001)
     
-    # 3. Risk Control Parameters (SL/TP)
+    # 3. Risk Control Parameters (SL/TP/Sigma)
     risk_params = {}
-    # Stop Loss: Search from 0.01 (1%) to 0.10 (10%) - tighter stops for crypto
-    risk_params["stop_loss"] = -trial.suggest_float("stop_loss_abs", 0.01, 0.10)
+    # Stop Loss: Search from 0.01 (1%) to 0.10 (10%)
+    risk_params["stop_loss"] = -trial.suggest_float("stop_loss_abs", 0.01, 0.15)
     # Take Profit: Search from 0.02 (2%) to 0.20 (20%)
-    risk_params["take_profit"] = trial.suggest_float("take_profit_abs", 0.02, 0.20)
+    risk_params["take_profit"] = trial.suggest_float("take_profit_abs", 0.02, 0.30)
+    # Min Sigma Threshold (Signal confidence)
+    risk_params["min_sigma"] = trial.suggest_float("min_sigma", 0.0, 2.0)
     
     # Update config for this trial
     trial_config = base_config.copy()
@@ -230,6 +232,7 @@ def objective(trial, model_type, folds, base_config, symbol):
     trial_config["trading"]["signal_threshold"] = strat_params["threshold"]
     trial_config["trading"]["stop_loss"] = risk_params["stop_loss"]
     trial_config["trading"]["take_profit"] = risk_params["take_profit"]
+    trial_config["trading"]["min_sigma_threshold"] = risk_params["min_sigma"]
     
     save_config(trial_config, trial_config_path)
     
@@ -326,7 +329,7 @@ def get_storage_url(config: Dict[str, Any]) -> Optional[str]:
     password = db_cfg.get("password", "crypto")
     host = db_cfg.get("host", "localhost")
     port = db_cfg.get("port", 5432)
-    dbname = db_cfg.get("dbname", "qlib_crypto")
+    dbname = db_cfg.get("database", "qlib_crypto") # Changed from dbname to database to match json
     return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
 def main():
@@ -409,7 +412,8 @@ def main():
                     "leverage": int(best_params.get("leverage", 1)),
                     "signal_threshold": best_params.get("threshold", 0.0),
                     "stop_loss": -best_params.get("stop_loss_abs", 0.1),
-                    "take_profit": best_params.get("take_profit_abs", 0.2)
+                    "take_profit": best_params.get("take_profit_abs", 0.2),
+                    "min_sigma_threshold": best_params.get("min_sigma", 0.0)
                 },
                 "backtest_topk": int(best_params.get("topk", 3))
             }

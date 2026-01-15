@@ -302,18 +302,28 @@ class Normalize:
         )
 
         # NOTE: It has been reported that there may be some problems here, and the specific issues will be dealt with when they are identified.
-        df = self._normalize_obj.normalize(df)
+        try:
+            df = self._normalize_obj.normalize(df)
+        except Exception as e:
+            logger.warning(f"Skip normalizing {file_path}: {e}")
+            return
+
         if df is not None and not df.empty:
             if self._end_date is not None:
                 _mask = pd.to_datetime(df[self._date_field_name]) <= pd.Timestamp(self._end_date)
                 df = df[_mask]
-            df.to_csv(self._target_dir.joinpath(file_path.name), index=False)
+            
+            # Reconstruct relative path to maintain hierarchy
+            rel_path = file_path.relative_to(self._source_dir)
+            target_path = self._target_dir.joinpath(rel_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(target_path, index=False)
 
     def normalize(self):
         logger.info("normalize data......")
 
         with ProcessPoolExecutor(max_workers=self._max_workers) as worker:
-            file_list = list(self._source_dir.glob("*.csv"))
+            file_list = list(self._source_dir.rglob("*.csv"))
             with tqdm(total=len(file_list)) as p_bar:
                 for _ in worker.map(self._executor, file_list):
                     p_bar.update()

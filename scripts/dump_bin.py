@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Union
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+import sys
 
 import fire
 import numpy as np
@@ -67,10 +68,10 @@ class DumpDataBase:
 
     def __init__(
         self,
-        data_path: str,
-        qlib_dir: str,
+        data_path: str = None,
+        qlib_dir: str = None,
         backup_dir: str = None,
-        freq: str = "day",
+        freq: str = None,
         max_workers: int = 16,
         date_field_name: str = "date",
         file_suffix: str = ".csv",
@@ -78,20 +79,21 @@ class DumpDataBase:
         exclude_fields: str = "",
         include_fields: str = "",
         limit_nums: int = None,
+        config_path: str = "config/workflow.json",
     ):
         """
 
         Parameters
         ----------
-        data_path: str
-            stock data path or directory
-        qlib_dir: str
-            qlib(dump) data director
+        data_path: str, default None
+            stock data path or directory (if None, loaded from config)
+        qlib_dir: str, default None
+            qlib(dump) data director (if None, loaded from config)
         backup_dir: str, default None
             if backup_dir is not None, backup qlib_dir to backup_dir
-        freq: str, default "day"
-            transaction frequency
-        max_workers: int, default None
+        freq: str, default None
+            transaction frequency (if None, loaded from config)
+        max_workers: int, default 16
             number of threads
         date_field_name: str, default "date"
             the name of the date field in the csv
@@ -105,7 +107,55 @@ class DumpDataBase:
             fields not dumped
         limit_nums: int
             Use when debugging, default None
+        config_path: str
+            Path to workflow configuration file, used if data_path/qlib_dir/freq are missing.
         """
+        # Load defaults from config if arguments are missing
+        if data_path is None or qlib_dir is None or freq is None:
+            try:
+                # Lazy import to avoid circular dependency issues if any
+                sys.path.append(str(Path(__file__).resolve().parent.parent))
+                from scripts.config_manager import ConfigManager
+                
+                logger.info(f"Loading defaults from {config_path}...")
+                cm = ConfigManager(config_path)
+                
+                if data_path is None:
+                    data_path = cm.get("data", "normalize_dir", "data/nor/crypto")
+                    logger.info(f"Using data_path from config: {data_path}")
+                
+                if qlib_dir is None:
+                    qlib_dir = cm.get("data", "bin_data_dir", "data/qlib_data/crypto")
+                    logger.info(f"Using qlib_dir from config: {qlib_dir}")
+                
+                if freq is None:
+                    # Convert config interval (e.g. 1h) to qlib freq (day, 1min) if needed
+                    # But for dump_bin, it often expects 'day' or '1min' directly, OR standard qlib format
+                    # ConfigManager has _convert_ccxt_freq_to_qlib but might need adjustment for bin dumping suffix
+                    raw_freq = cm.get("data_collection", "interval", "1h")
+                    # Simple mapping for common defaults
+                    if raw_freq == "1d" or raw_freq == "day":
+                        freq = "day"
+                    elif raw_freq.endswith("h"):
+                         # e.g. 1h -> 60min
+                         freq = "60min" # Standard Qlib usually uses Xmin for intraday
+                         if raw_freq == "1h": freq = "60min"
+                         if raw_freq == "4h": freq = "240min"
+                    elif raw_freq.endswith("m") or raw_freq.endswith("min"):
+                        freq = raw_freq.replace("m", "min")
+                        if freq.endswith("minin"): freq = freq.replace("minin", "min") # edge case correction
+                    else:
+                        freq = raw_freq
+                    logger.info(f"Using freq from config: {freq} (derived from {raw_freq})")
+            
+            except Exception as e:
+                if data_path is None or qlib_dir is None:
+                     raise ValueError(f"Required arguments data_path/qlib_dir missing and config load failed: {e}")
+                logger.warning(f"Config load failed, using provided args: {e}")
+        
+        # Final Fallback defaults if still None (though they shouldn't be if config worked or args provided)
+        if freq is None: freq = "day"
+
         data_path = Path(data_path).expanduser()
         if isinstance(exclude_fields, str):
             exclude_fields = exclude_fields.split(",")
@@ -353,6 +403,15 @@ class DumpDataAll(DumpDataBase):
         self._dump_calendars()
         self._dump_instruments()
         self._dump_features()
+
+        print("\n" + "=" * 80)
+        print("Data Binary Dump complete. Next steps:")
+        print("=" * 80)
+        print("1. Tune Hyperparameters (Optional):")
+        print(f"   python scripts/tune_hyperparameters.py")
+        print("\n2. Train Sample Model:")
+        print(f"   python scripts/train_sample_model.py")
+        print("=" * 80 + "\n")
 
 
 class DumpDataFix(DumpDataAll):

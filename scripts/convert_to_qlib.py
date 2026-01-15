@@ -359,16 +359,13 @@ class DumpDataCrypto(DumpDataAll):
         self.all_data = {}  # Will be set externally
     
     def get_symbol_from_file(self, file_path: Path) -> str:
-        """Convert file path to symbol, handling crypto naming conventions."""
-        # file_path.stem is like 'BTC_USDT', we need to convert to 'BTCUSDT'
-        symbol_with_underscore = file_path.stem.strip().lower()
-        # Remove underscores to match qlib's expected format
-        symbol = symbol_with_underscore.replace('_', '')
-        return fname_to_code(symbol)
+        """Convert file path to symbol, handling hierarchical naming."""
+        # We use '#' as a separator in temp files to represent '/' in qlib symbols
+        return file_path.stem.replace('#', '/')
     
     def _normalize_symbol(self, symbol: str) -> str:
-        """Normalize symbol by removing slashes and underscores."""
-        return symbol.replace('/', '').replace('_', '').lower()
+        """Normalize symbol while preserving hierarchical structure casing."""
+        return symbol
     
     def _dump_features(self):
         logger.info("start dump features......")
@@ -387,7 +384,7 @@ class DumpDataCrypto(DumpDataAll):
             if file_or_data.empty:
                 return
             raw_symbol = str(file_or_data.iloc[0][self.symbol_field_name])
-            code = raw_symbol.upper()  # Keep original symbol format like "BTC/USDT"
+            code = raw_symbol  # Keep casing as provided
             df = file_or_data
         elif isinstance(file_or_data, Path):
             code = self.get_symbol_from_file(file_or_data)
@@ -401,8 +398,9 @@ class DumpDataCrypto(DumpDataAll):
         # try to remove dup rows or it will cause exception when reindex.
         df = df.drop_duplicates(self.date_field_name)
 
-        # features save dir - match instrument naming convention
-        features_dir = self._features_dir.joinpath(code.upper().replace('/', ''))
+        # features save dir - match Qlib's lowercase expectation on disk
+        # code is like "ETH_USDT/240min/FUTURE"
+        features_dir = self._features_dir.joinpath(code.lower())
         features_dir.mkdir(parents=True, exist_ok=True)
         
         # For crypto, save data directly without calendar alignment
@@ -461,7 +459,8 @@ class DumpDataCrypto(DumpDataAll):
             field_data = _df[field].ffill().bfill().interpolate(method='linear').fillna(0).values
             
             # Save in qlib format: [start_index, values...]
-            bin_path = features_dir.joinpath(f"{field}.{self.freq}.bin")
+            # Qlib's FileFeatureStorage forces lower() on field and freq
+            bin_path = features_dir.joinpath(f"{field.lower()}.{self.freq.lower()}.bin")
             data_array = np.concatenate([[start_index], field_data]).astype(np.float32)
             data_array.astype("<f").tofile(str(bin_path))
             logger.info(f"Saved {field} to {bin_path}, size: {len(data_array)}")
@@ -480,39 +479,42 @@ class DumpDataCrypto(DumpDataAll):
         for symbol, df in self.all_data.items():
             if not df.empty and self.date_field_name in df.columns:
                 timestamps = pd.to_datetime(df[self.date_field_name])
-                begin_time = self._format_datetime(timestamps.min())
-                end_time = self._format_datetime(timestamps.max())
-                # Use symbol without slashes to match folder names
-                symbol_clean = symbol.replace('/', '').upper()
-                inst_fields = [symbol_clean, begin_time, end_time]
+                start_time = timestamps.min()
+                end_time = timestamps.max()
+                begin_time = self._format_datetime(start_time)
+                end_time = self._format_datetime(end_time)
+                # Store symbol as is (it should already be normalized)
+                inst_fields = [symbol, begin_time, end_time]
                 date_range_list.append(f"{self.INSTRUMENTS_SEP.join(inst_fields)}")
         
         self.save_instruments(date_range_list)
         logger.info("end of instruments dump.\n")
     
     def _dump_calendars_crypto(self):
-        """Create calendar file for crypto data using date range."""
+        """Create calendar file for crypto data using data from memory."""
         logger.info("start dump calendars for crypto......")
         
-        # For crypto, create an hourly calendar since markets are 24/7
-        start_date = pd.Timestamp('2021-01-01')
-        end_date = pd.Timestamp('2025-12-31')
+        # use dates from memory
+        all_dates = []
+        for qlib_symbol, df in self.all_data.items():
+            all_dates.extend(df[self.date_field_name].tolist())
         
-        # Create hourly date range for 60min frequency
-        date_range = pd.date_range(start=start_date, end=end_date, freq='H')
-        self._calendars_list = [d for d in date_range]
+        if not all_dates:
+            logger.warning("No data found to generate calendar")
+            return
+            
+        all_dates = sorted(list(set(pd.to_datetime(all_dates))))
+        self._calendars_list = all_dates
         
-        self.save_calendars(self._calendars_list)
-        logger.info(f"Created hourly calendar with {len(self._calendars_list)} timestamps for crypto")
-        logger.info("end of calendars dump.\n")
-        if self._kwargs.get("all_datetime_set"):
-            datetime_set = set(map(pd.Timestamp, self._kwargs["all_datetime_set"]))
-            date_set = set(ts.date() for ts in datetime_set)
-            self._calendars_list = sorted(date_set)
-            self.save_calendars(self._calendars_list)
-            logger.info(f"Created date calendar with {len(self._calendars_list)} dates from _get_all_date")
-        else:
-            logger.warning("No datetime data found for calendar creation")
+        # Save to target freq
+        qlib_freq = convert_interval_to_qlib_freq(self.freq)
+        self._calendars_dir.mkdir(parents=True, exist_ok=True)
+        calendar_path = self._calendars_dir.joinpath(f"{qlib_freq}.txt")
+        with open(calendar_path, "w") as f:
+            for d in self._calendars_list:
+                f.write(f"{d}\n")
+                
+        logger.info(f"Created calendar {qlib_freq} with {len(self._calendars_list)} timestamps")
         logger.info("end of calendars dump.\n")
 
 """
@@ -535,29 +537,30 @@ print(f"DEBUG: data_source from config: {config.get('data_convertor', {}).get('d
 input_dir = config.get("data", {}).get("csv_data_dir", "data/klines")
 output_dir = os.path.abspath(config.get("data", {}).get("bin_data_dir", "data/qlib_data/crypto"))
 
-def validate_data_integrity(df, freq):
+def validate_data_integrity(df, freq, date_field="date"):
     """
     Validate data integrity by checking for gaps and ensuring correct timestamps.
 
     Args:
         df (pd.DataFrame): DataFrame containing OHLCV data.
         freq (str): Frequency string for pd.date_range (e.g., "15T" for 15 minutes).
-
+        date_field (str): Name of the date/time column.
+    
     Returns:
         bool: True if data is valid, False otherwise.
     """
     if df.empty:
         return False
-    # Convert timestamp to datetime
+    # Convert date_field to datetime
     df_copy = df.copy()
-    df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'])
+    df_copy[date_field] = pd.to_datetime(df_copy[date_field])
     # Check for missing timestamps
     expected_intervals = pd.date_range(
-        start=df_copy["timestamp"].min(),
-        end=df_copy["timestamp"].max(),
+        start=df_copy[date_field].min(),
+        end=df_copy[date_field].max(),
         freq=freq
     )
-    actual_intervals = df_copy["timestamp"]
+    actual_intervals = df_copy[date_field]
     return set(expected_intervals).issubset(set(actual_intervals))
 
 
@@ -622,48 +625,65 @@ def convert_to_qlib(source: str = None):
         exclude_fields_list.append('interval')
     exclude_fields = ','.join(exclude_fields_list)
     
+    print(f"Target Frequency: {target_freq}")
     print(f"Converting data to {target_freq} frequency from source: {source}...")
     
     all_data = {}  # Dictionary to hold all symbol data in memory
     
     # Load data from CSV if source includes csv
     if source in ["csv", "both"]:
-        for symbol_dir in os.listdir(input_dir):
-            symbol_path = os.path.join(input_dir, symbol_dir)
-            if os.path.isdir(symbol_path):
-                symbol_data = []
-                for file in os.listdir(symbol_path):
-                    if file.endswith(".csv"):
-                        df = pd.read_csv(os.path.join(symbol_path, file))
-                        # Resample to target frequency if needed
-                        if target_freq != "1min":
-                            df[date_field_name] = pd.to_datetime(df[date_field_name])
-                            df = df.set_index(date_field_name)
-                            # Resample OHLCV data appropriately
-                            resampled = df.resample(target_freq).agg({
-                                'open': 'first',
-                                'high': 'max', 
-                                'low': 'min',
-                                'close': 'last',
-                                'volume': 'sum'
-                            }).dropna()
-                            df = resampled.reset_index()
-                        
-                        symbol_data.append(df)
-                if symbol_data:
-                    # Merge and deduplicate data for this symbol
-                    merged_df = pd.concat(symbol_data).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
-                    # Convert timestamp to datetime string for Qlib compatibility
-                    merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
-                    if validate_data_integrity(merged_df, target_freq):
-                        all_data[symbol_dir] = merged_df  # Store in memory
-                        # Log before convert information
-                        start_time = merged_df[date_field_name].min()
-                        end_time = merged_df[date_field_name].max()
-                        total_records = len(merged_df)
-                        logger.info(f"Before convert - Symbol: {symbol_dir}, Start: {start_time}, End: {end_time}, Records: {total_records}")
-                    else:
-                        print(f"Data integrity validation failed for {symbol_dir}")
+        # Recursively find all CSV files in the hierarchical structure
+        import glob
+        csv_files = glob.glob(os.path.join(input_dir, "**/*.csv"), recursive=True)
+        
+        symbol_groups = {}
+        for csv_file in csv_files:
+            # Determine symbol/interval/market_type from path
+            # Expected structure: root/ETH_USDT/4h/future/ETH_USDT.csv
+            rel_path = os.path.relpath(csv_file, input_dir)
+            parts = rel_path.split(os.sep)
+            if len(parts) >= 4:
+                symbol = parts[0]
+                # Use target_freq for the qlib instrument name to match expectation
+                market_type = parts[2]
+                qlib_symbol = f"{symbol.upper()}/{target_freq}/{market_type.upper()}"
+                
+                if qlib_symbol not in symbol_groups:
+                    symbol_groups[qlib_symbol] = []
+                
+                df = pd.read_csv(csv_file)
+                # Resample to target frequency if needed
+                if target_freq != "1min":
+                    df[date_field_name] = pd.to_datetime(df[date_field_name])
+                    df = df.set_index(date_field_name)
+                    # Resample OHLCV data appropriately
+                    resampled = df.resample(target_freq).agg({
+                        'open': 'first',
+                        'high': 'max', 
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                    df = resampled.reset_index()
+                    print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
+                
+                symbol_groups[qlib_symbol].append(df)
+
+        for qlib_symbol, dfs in symbol_groups.items():
+            if dfs:
+                # Merge and deduplicate data for this symbol
+                merged_df = pd.concat(dfs).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
+                # Convert timestamp to datetime string for Qlib compatibility
+                merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
+                if validate_data_integrity(merged_df, target_freq, date_field=date_field_name):
+                    all_data[qlib_symbol] = merged_df  # Store in memory
+                    # Log before convert information
+                    start_time = merged_df[date_field_name].min()
+                    end_time = merged_df[date_field_name].max()
+                    total_records = len(merged_df)
+                    logger.info(f"Before convert - Symbol: {qlib_symbol}, Start: {start_time}, End: {end_time}, Records: {total_records}")
+                else:
+                    print(f"Data integrity validation failed for {qlib_symbol}")
     
     # Load data from database if source includes db
     if source in ["db", "both"]:
@@ -714,7 +734,8 @@ def convert_to_qlib(source: str = None):
     # Create temporary directory for CSV files
     with tempfile.TemporaryDirectory() as temp_dir:
         for symbol, df in all_data.items():
-            filename = symbol.replace("/", "_")
+            # Use '#' to represent '/' in temp filenames to keep it safe and reconstructible
+            filename = symbol.replace("/", "#")
             df.to_csv(os.path.join(temp_dir, f"{filename}.csv"), index=False)
 
         # Run DumpDataCrypto on the temp dir (skips calendar creation for crypto)
