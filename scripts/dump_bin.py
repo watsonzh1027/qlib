@@ -312,6 +312,8 @@ class DumpDataBase:
             bin_path = features_dir.joinpath(f"{field.lower()}.{self.freq}{self.DUMP_FILE_SUFFIX}")
             if field not in _df.columns:
                 continue
+            if not np.issubdtype(_df[field].dtype, np.number):
+                continue
             if bin_path.exists() and self._mode == self.UPDATE_MODE:
                 # update
                 with bin_path.open("ab") as fp:

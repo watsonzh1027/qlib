@@ -14,8 +14,10 @@ from qlib.contrib.report import analysis_model, analysis_position
 from qlib.contrib.strategy import CryptoLongShortStrategy
 from qlib.utils.logging_config import setup_logging
 
+from qlib.utils.logging_config import startlog, endlog
+
 # Configure logging
-logger = setup_logging()
+logger = startlog("run_backtest")
 
 # Add project root to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -235,6 +237,7 @@ def main():
     else:
         total_trades = 0
     print(f"Total Trades: {total_trades}")
+    endlog(logger, "run_backtest")
 
 if __name__ == "__main__":
     main()

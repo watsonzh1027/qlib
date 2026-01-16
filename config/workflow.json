@@ -14,7 +14,7 @@
     "symbols": "config/instruments.json"
   },
   "data_collection": {
-    "interval": "1h",
+    "interval": "4h",
     "api_timeout": 10,
     "start_time": "2020-01-01",
     "end_time": "",

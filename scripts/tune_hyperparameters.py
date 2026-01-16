@@ -405,6 +405,7 @@ def main():
             study.optimize(lambda trial: objective(trial, model_type, folds, base_config, symbol), n_trials=args.trials, n_jobs=args.n_jobs)
             
             logger.info(f"✅ {symbol} Tuning Complete. Best WPS: {study.best_value:.4f}")
+            logger.info(f"🏆 Best Params for {symbol}:\n{json.dumps(study.best_params, indent=2)}")
             all_best_params[symbol] = study.best_params
 
         # Update Config with Per-Symbol Params

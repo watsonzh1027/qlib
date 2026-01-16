@@ -74,6 +74,51 @@ def rotate_numbered_logs(directory: Path, base_name: str, extension: str, max_in
                 pass
     return new_log
 
+def cleanup_old_group_logs(directory: Path, prefix: str, current_base: str, max_count: int):
+    """
+    Clean up logs matching 'prefix*' that do not belong to 'current_base', 
+    to ensure total files (current + others) <= max_count.
+    Prioritize keeping current files, then newest other files.
+    """
+    try:
+        # Glob patterns are simple, but we need strict prefix matching
+        # prefix e.g. "qlib-train_sample_model"
+        # file e.g. "qlib-train_sample_model-12345-1.log"
+        candidates = [f for f in directory.iterdir() if f.name.startswith(prefix) and f.suffix == '.log']
+        
+        current_run_files = []
+        other_run_files = []
+        
+        for f in candidates:
+            # Check if it belongs to current run (starts with current_base-)
+            # current_base e.g. "qlib-train_sample_model-12345"
+            # We add "-" to ensure we don't accidentally match "qlib-train_sample_model-123456"
+            if f.name.startswith(f"{current_base}-"):
+                current_run_files.append(f)
+            else:
+                other_run_files.append(f)
+                
+        current_cnt = len(current_run_files)
+        # Assuming current run will take at least 1 slot soon
+        effective_current = max(1, current_cnt) 
+        
+        remaining = max_count - effective_current
+        if remaining < 0:
+            remaining = 0
+            
+        if len(other_run_files) > remaining:
+            # Sort by mtime, oldest first
+            other_run_files.sort(key=lambda x: x.stat().st_mtime)
+            num_to_delete = len(other_run_files) - remaining
+            
+            for f in other_run_files[:num_to_delete]:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 class NumberedRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """Custom RotatingFileHandler that uses -1.log, -2.log naming scheme."""
     def doRollover(self):
@@ -104,14 +149,18 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
     
     current_pid = os.getpid()
     with _initialization_lock:
-        # Check if already initialized in this process
         if _initialized_pid == current_pid and name is None:
             return logging.getLogger()
         
         log_cfg = load_logging_config()
         
+        # Config values
         log_level_str = log_cfg.get("level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
+        log_base = log_cfg.get("log_base", "qlib-")
+        log_file_tmpl = log_cfg.get("log_file", "<module.name>")
+        max_index = int(log_cfg.get("max_index", 9))
+        output_modes = [m.strip().lower() for m in log_cfg.get("output", "file").split(",")]
         
         # Identify module name
         if name:
@@ -121,73 +170,62 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
         else:
             module_name = "unknown"
         
-        # Handle log_file template
-        log_file_tmpl = log_cfg.get("log_file", "<module.name>")
-        log_suffix = log_file_tmpl.replace("<module.name>", module_name)
+        # Group Prefix (e.g. qlib-train_sample_model)
+        base_suffix = log_file_tmpl.replace("<module.name>", module_name)
+        log_prefix_group = f"{log_base}{base_suffix}"
         
         # Multi-process / Sub-process support
         main_pid_env = os.environ.get("QLIB_MAIN_PID")
         
         if is_subprocess is None:
-            # Auto-detect subprocess status
             if main_pid_env and int(main_pid_env) != current_pid:
-                # We have a parent Qlib process
                 actual_is_subprocess = True
                 main_pid = int(main_pid_env)
             else:
-                # Check if it's a multiprocessing child (within same interpreter)
                 is_mp_child = (multiprocessing.current_process().name != 'MainProcess')
                 if is_mp_child:
                     actual_is_subprocess = True
                     main_pid = os.getppid()
                 else:
-                    # We are the Main Process
                     actual_is_subprocess = False
                     main_pid = current_pid
-                    # Set the environment variable for future child processes (multiprocessing or subprocess)
                     os.environ["QLIB_MAIN_PID"] = str(current_pid)
         else:
             actual_is_subprocess = is_subprocess
             main_pid = int(main_pid_env) if main_pid_env else current_pid
 
         if actual_is_subprocess:
-            # Add main PID to suffix to group logs by session
-            log_suffix = f"{log_suffix}-{main_pid}"
-        
-        log_base = log_cfg.get("log_base", "qlib-")
-        combined_log_base = f"{log_base}{log_suffix}" if log_suffix else log_base
-        
-        max_index = int(log_cfg.get("max_index", 9))
-        output_modes = [m.strip().lower() for m in log_cfg.get("output", "file").split(",")]
+            combined_log_base = f"{log_prefix_group}-{main_pid}"
+        else:
+            combined_log_base = log_prefix_group
         
         # Get root logger
         logger = logging.getLogger()
         logger.setLevel(log_level)
-        
-        # Remove existing handlers to avoid duplication and override defaults
         while logger.handlers:
             logger.removeHandler(logger.handlers[0])
         
-        # Format: time | level | name:func:line - message
         formatter = logging.Formatter(
             "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         
-        # Console Handler
         if "console" in output_modes:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
         
-        # File Handler logic
         if "file" in output_modes:
             project_root = Path(__file__).parent.parent.parent
             log_dir = project_root / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             
+            # --- START CLEANUP ---
+            # Ensure total log files for this module do not exceed max_index
+            cleanup_old_group_logs(log_dir, log_prefix_group, combined_log_base, max_index)
+            # --- END CLEANUP ---
+            
             extension = ".log"
-            # Perform manual rotation at startup ONLY for the main process
             if not skip_rotation and not actual_is_subprocess:
                 log_path = rotate_numbered_logs(log_dir, combined_log_base, extension, max_index)
                 mode = 'w'
@@ -195,10 +233,7 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
                 log_path = log_dir / f"{combined_log_base}-1{extension}"
                 mode = 'a'
             
-            # Use custom rotating handler for both startup and over-size rotation
-            max_bytes = int(log_cfg.get("max_bytes", 100 * 1024 * 1024)) # Default 100MB
-            # By using NumberedRotatingFileHandler, we support both the startup rotation 
-            # and the runtime over-size rotation as requested.
+            max_bytes = int(log_cfg.get("max_bytes", 100 * 1024 * 1024))
             file_handler = NumberedRotatingFileHandler(
                 log_path, mode=mode, encoding="utf-8", 
                 maxBytes=max_bytes, backupCount=max_index-1
@@ -213,7 +248,7 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
             if _initialized_pid != current_pid:
                 logger.info(f"Logging initialized for {module_name} (Console only)")
         
-        # CRITICAL: Suppress qlib's default file logging to qlib.log
+        # Suppress Qlib default logging
         try:
             from qlib.config import C
             def disable_qlib_file_logging(conf):
@@ -224,16 +259,12 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
                     if "loggers" in lc and "qlib" in lc["loggers"]:
                         qlib_cfg = lc["loggers"]["qlib"]
                         if "handlers" in qlib_cfg:
-                            # Remove all qlib-specific handlers to avoid duplicates and use root logger
                             qlib_cfg["handlers"] = []
                         qlib_cfg["propagate"] = True
 
-            # Disable in current config
             disable_qlib_file_logging(C.__dict__.get("_config", {}))
-            # Disable in default config so qlib.init() won't restore it
             disable_qlib_file_logging(C.__dict__.get("_default_config", {}))
             
-            # Also clear current handlers if already initialized
             qlib_logger = logging.getLogger("qlib")
             qlib_logger.propagate = True
             for h in qlib_logger.handlers[:]:
@@ -241,7 +272,6 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
         except (ImportError, AttributeError):
             pass
         
-        # Log the full command line for traceability
         try:
             if hasattr(sys, 'argv') and sys.argv:
                 cmd_line = " ".join(sys.argv)
@@ -261,3 +291,23 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
 
 # Auto-initialize on import
 #setup_logging()
+
+def addHeader(logger: logging.Logger, title: str):
+    """Add a visual header to the log."""
+    pid = os.getpid()
+    logger.info(f"\n{'='*20} START {title} (PID: {pid}) {'='*20}")
+
+def addFooter(logger: logging.Logger, title: str):
+    """Add a visual footer to the log."""
+    pid = os.getpid()
+    logger.info(f"{'='*20} END {title} (PID: {pid}) {'='*20}\n")
+
+def startlog(name: str, **kwargs):
+    """Initialize logging and print header. Wraps setup_logging."""
+    logger = setup_logging(name=name, **kwargs)
+    addHeader(logger, name)
+    return logger
+
+def endlog(logger: logging.Logger, name: str):
+    """Print footer."""
+    addFooter(logger, name)
