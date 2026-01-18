@@ -19,10 +19,10 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 import sys
-from qlib.utils.logging_config import setup_logging
+from qlib.utils.logging_config import startlog
 
 # Configure logging
-logger = setup_logging(name="tuning")
+logger = startlog(name="tuning")
 
 CONFIG_PATH = Path("config/workflow.json")
 BACKUP_PATH = Path("config/workflow.json.bak")
@@ -148,11 +148,11 @@ def objective_model(trial, model_type, folds, base_config, symbol):
         ic = parse_ic(res.stdout)
         
         if ic == -999.0:
-            print(f"❌ Fold {i}: Tuning failed. Output snippet:\n{res.stdout[-300:]}")
+            logger.error(f"❌ Fold {i}: Tuning failed. Output snippet:\n{res.stdout[-300:]}")
             return -999.0
             
         fold_ics.append(ic)
-        print(f"   > Fold {i} IC: {ic:.4f}")
+        logger.info(f"   > Fold {i} IC: {ic:.4f}")
 
     # Cleanup
     if config_path.exists(): config_path.unlink()
@@ -219,14 +219,44 @@ def objective_strategy(trial, folds, base_config, symbol, best_model_params, mod
             
     if config_path.exists(): config_path.unlink()
     
-    return float(pd.Series(fold_sharpes).median())
+    median_sharpe = float(pd.Series(fold_sharpes).median())
+    logger.info(f"   > Trial {trial_id} Median Sharpe: {median_sharpe:.4f}")
+    return median_sharpe
+
+# --- Main Runners ---
+
+def get_storage_url(config: Dict[str, Any]) -> str:
+    db_cfg = config.get("database", {})
+    if not db_cfg.get("use_db", False):
+        return None
+    user = db_cfg.get("user", "crypto_user")
+    password = db_cfg.get("password", "crypto")
+    host = db_cfg.get("host", "localhost")
+    port = db_cfg.get("port", 5432)
+    dbname = db_cfg.get("database", "qlib_crypto")
+    return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
 # --- Main Runners ---
 
 def run_model_tuning(args, base_config, symbol, folds, model_type):
     logger.info(f"🚀 [Phase 1] Tuning Model for {symbol} (Target: IC)")
-    study = optuna.create_study(direction="maximize")
-    study.optimize(lambda t: objective_model(t, model_type, folds, base_config, symbol), n_trials=args.trials)
+    storage_url = get_storage_url(base_config)
+    study_name = f"tuning_model_{symbol.replace('/','_')}"
+    
+    study = optuna.create_study(
+        study_name=study_name, 
+        storage=storage_url, 
+        direction="maximize", 
+        load_if_exists=True
+    )
+
+    # Hint for parallel execution
+    if args.n_jobs > 1:
+        logger.info(f"⚠️  Parallel mode (n_jobs={args.n_jobs}) enabled. Console logs from workers may be buffered.")
+        logger.info(f"👉 Please run: tail -f logs/qlib-tuning-1.log to monitor realtime details.")
+
+    study.optimize(lambda t: objective_model(t, model_type, folds, base_config, symbol), 
+                   n_trials=args.trials, n_jobs=args.n_jobs, show_progress_bar=True)
     
     logger.info(f"✅ Best IC: {study.best_value:.4f}")
     logger.info(f"🏆 Best Model Params: {study.best_params}")
@@ -271,10 +301,18 @@ def run_strategy_tuning(args, base_config, symbol, folds, model_type, best_model
         print("Done.")
         
     # 2. Optimize Strategy
-    study = optuna.create_study(direction="maximize")
+    storage_url = get_storage_url(base_config)
+    study_name = f"tuning_strategy_{symbol.replace('/','_')}"
+    
+    study = optuna.create_study(
+        study_name=study_name, 
+        storage=storage_url, 
+        direction="maximize", 
+        load_if_exists=True
+    )
     study.optimize(lambda t: objective_strategy(t, folds, base_config, symbol, 
                                                 best_model_params, model_type, pretrained_models), 
-                   n_trials=args.trials)
+                   n_trials=args.trials, n_jobs=args.n_jobs, show_progress_bar=True)
                    
     # 3. Cleanup Pretrained Models
     for p in pretrained_models:
@@ -290,6 +328,7 @@ def main():
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--rows", type=int, default=None, help="Limit symbols")
     parser.add_argument("--model", default="lightgbm")
+    parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers")
     args = parser.parse_args()
     
     setup_dirs()
@@ -363,7 +402,20 @@ def main():
             }
             save_config(best_config, BEST_CONFIG_PATH)
 
-    print("\noptimization complete.")
+    logger.info("\n" + "="*80)
+    logger.info("🎉 Optimization Complete!")
+    logger.info("="*80)
+    logger.info("To view detailed visualizations and reports, run:")
+    
+    for symbol in symbols:
+        logger.info(f"\n[Symbol: {symbol}]")
+        logger.info(f"  1. Model Analysis (IC/ICIR):")
+        logger.info(f"     python scripts/analyze_tuning.py --symbol {symbol} --stage model")
+        logger.info(f"  2. Strategy Analysis (Sharpe/Drawdown):")
+        logger.info(f"     python scripts/analyze_tuning.py --symbol {symbol} --stage strategy")
+        
+    logger.info("\nReports will be saved to the 'reports/' directory.")
+    logger.info("="*80 + "\n")
 
 if __name__ == "__main__":
     main()

@@ -160,7 +160,7 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
         log_base = log_cfg.get("log_base", "qlib-")
         log_file_tmpl = log_cfg.get("log_file", "<module.name>")
         max_index = int(log_cfg.get("max_index", 9))
-        output_modes = [m.strip().lower() for m in log_cfg.get("output", "file").split(",")]
+        output_modes = [m.strip().lower() for m in log_cfg.get("output", "file, console").split(",")]
         
         # Identify module name
         if name:
