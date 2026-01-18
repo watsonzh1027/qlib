@@ -136,7 +136,10 @@ class CryptoLongShortStrategy(WeightStrategyBase):
             f_dbg.write(f"Potential after Target Match: {len(potential_entries)}\n")
             
             # Exclude those already hitting exit this step
-            potential_entries = potential_entries[~potential_entries.index.isin(active_exits)]
+        # BLOCKED: We WANT to allow immediate reversal (Long -> Short), so don't exclude immediately.
+        # Logic later handles side determination. If we exited due to Reversal (Score < 0), 
+        # listing it here allows generating a Short target in the same step.
+        # potential_entries = potential_entries[~potential_entries.index.isin(active_exits)]
             
             # Signal Threshold Filtering (Magnitude)
             if self.signal_threshold > 0:
@@ -175,12 +178,27 @@ class CryptoLongShortStrategy(WeightStrategyBase):
             final_list = sorted(final_list, key=lambda x: potential_entries.get(x, 0), reverse=True)[:self.topk]
 
         for inst in final_list:
-            if inst in active_exits:
-                continue
-                
-            # Determine Side
             inst_score = score.get(inst, 0)
-            if inst in held_list:
+            
+            # Handle Active Exits (Check for SAR - Stop And Reverse)
+            if inst in active_exits:
+                curr_side = self.entry_info.get(inst, {}).get("side", 0)
+                # Reversal: Long & Score<0  OR  Short & Score>0
+                is_reversal = (curr_side == 1 and inst_score < 0) or (curr_side == -1 and inst_score > 0)
+                
+                if not is_reversal:
+                    continue
+                
+                # If Reversal, force new side calculation (ignore held status)
+                if self.direction == "long-short":
+                    side = 1 if inst_score >= 0 else -1
+                elif self.direction == "short":
+                    side = -1 
+                else: 
+                    side = 1
+                logger.info(f"ENTRY [Reversal] {inst}: NewSide={side}, Score={inst_score:.4f}")
+            
+            elif inst in held_list:
                 side = self.entry_info[inst]["side"]
             else:
                 if self.direction == "long-short":

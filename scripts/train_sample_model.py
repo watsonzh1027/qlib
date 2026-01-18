@@ -13,8 +13,10 @@ from qlib.data.dataset.handler import DataHandlerLP
 from qlib.contrib.model.gbdt import LGBModel
 from qlib.utils.logging_config import setup_logging
 
+from qlib.utils.logging_config import startlog, endlog
+
 # Configure logging
-logger = setup_logging()
+logger = startlog("train_sample_model")
 
 # Add project root to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -59,6 +61,13 @@ def main():
     # Prepare Data Handler Config
     # The symbol is in config["training"]["instruments"] (list)
     raw_symbols = config.get("training", {}).get("instruments", [])
+    if not raw_symbols:
+        dh_cfg = cm.get_data_handler_config()
+        if "kwargs" in dh_cfg and "instruments" in dh_cfg["kwargs"]:
+            raw_symbols = dh_cfg["kwargs"]["instruments"]
+        elif "instruments" in dh_cfg:
+            raw_symbols = dh_cfg["instruments"]
+
     instruments = [map_symbol(s) for s in raw_symbols]
     
     # Get freq from resolved workflow config to ensure consistency
@@ -75,7 +84,10 @@ def main():
         "fit_end_time": args.train_end,
         "instruments": instruments,
         "infer_processors": [],
-        "learn_processors": [],
+        "learn_processors": [
+            {"class": "DropnaLabel"},
+            {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "label"}}
+        ],
         "freq": raw_freq
     }
     
@@ -135,6 +147,40 @@ def main():
     print("Training model...")
     model.fit(dataset)
     
+    # Calculate IC on Validation Set for Tuning
+    try:
+        # Predict on valid
+        pred = model.predict(dataset, segment="valid")
+        if isinstance(pred, pd.DataFrame):
+            pred = pred.iloc[:, 0]
+            
+        # Get label
+        label = dataset.prepare("valid", col_set="label")
+        if isinstance(label, pd.DataFrame):
+            label = label.iloc[:, 0]
+            
+        # Align indices
+        df_eval = pd.DataFrame({"pred": pred, "label": label}).dropna()
+        
+        # Calculate IC
+        ic = df_eval["pred"].corr(df_eval["label"])
+        
+        # Calculate ICIR (Mean IC / Std IC per day)
+        # Assuming index has datetime level
+        if isinstance(df_eval.index, pd.MultiIndex):
+            dates = df_eval.index.get_level_values("datetime")
+            df_eval["date"] = dates
+            daily_ic = df_eval.groupby("date").apply(lambda x: x["pred"].corr(x["label"]))
+            icir = daily_ic.mean() / daily_ic.std() if daily_ic.std() > 0 else 0
+        else:
+            icir = 0
+            
+        print(f"IC: {ic:.4f}")
+        print(f"ICIR: {icir:.4f}")
+        
+    except Exception as e:
+        print(f"Error calculating IC: {e}")
+    
     # Predict (on train+valid, maybe? Or just valid? tuning script backtests on TEST)
     # Wait, the tuning script passes --start --end to run_backtest.py matching the TEST fold.
     # So we should probably predict on TEST set? 
@@ -150,6 +196,7 @@ def main():
         pickle.dump(model, f)
         
     print(f"Model saved to {model_path}")
+    endlog(logger, "train_sample_model")
 
 if __name__ == "__main__":
     main()

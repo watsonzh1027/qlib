@@ -72,7 +72,15 @@ def main():
         model = pickle.load(f)
 
     # Prepare Dataset for Test
+    # Prepare Dataset for Test
     raw_symbols = config.get("training", {}).get("instruments", [])
+    if not raw_symbols:
+        dh_cfg = cm.get_data_handler_config()
+        if "kwargs" in dh_cfg and "instruments" in dh_cfg["kwargs"]:
+            raw_symbols = dh_cfg["kwargs"]["instruments"]
+        elif "instruments" in dh_cfg:
+            raw_symbols = dh_cfg["instruments"]
+
     instruments = [map_symbol(s) for s in raw_symbols]
     
     # Dataset just for prediction (Test Segment)

@@ -35,6 +35,10 @@ def main():
     else:
         best_params = config["per_symbol_models"][symbol]
     
+    # Force Qlib symbol to match what is in all.txt
+    if "ETH" in symbol:
+        q_symbol = "ETH_USDT"
+    
     print(f"Running Full Backtest for {symbol} with best params...")
     print(f"Signal Threshold: {best_params['trading']['signal_threshold']:.6f}")
     print(f"Min Sigma Threshold: {best_params['trading'].get('min_sigma_threshold', 0.0):.4f}")
