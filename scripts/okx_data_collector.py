@@ -146,8 +146,9 @@ def validate_trading_pair_availability(symbol: str, requested_start: str, reques
         if not hasattr(exchange, 'markets') or exchange.markets is None:
             exchange.load_markets()
 
-        # Normalize symbol for CCXT/OKX
-        market_symbol = normalize_symbol(symbol)
+        # Normalize symbol for CCXT/OKX using get_ccxt_symbol
+        from scripts.symbol_utils import get_ccxt_symbol
+        market_symbol = get_ccxt_symbol(normalize_symbol(symbol))
 
         # Only perform strict dict-based validation and loose key matching if the exchange provides a dict of markets
         exchange_markets = getattr(exchange, 'markets', None)
@@ -997,7 +998,7 @@ def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
         logger.error(f"Failed to load symbols: {e}")
         return []
 
-def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None, output_format: str = "csv", postgres_storage: PostgreSQLStorage = None) -> Dict[str, pd.DataFrame]:
+def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None, output_format: str = "csv", postgres_storage: PostgreSQLStorage = None, timeframe: str = None) -> Dict[str, pd.DataFrame]:
     """
     Fetch latest 1m candles for specified symbols via REST API within the given time range.
 
@@ -1024,8 +1025,12 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 self.limit = config.get("data_collection", {}).get("limit", 100)
         args = DefaultArgs()
 
+    # Use provided timeframe or default to global config
+    if timeframe is None:
+        timeframe = TIMEFRAME
+
     result = {}
-    logger.debug(f"Updating latest data for {len(symbols)} symbols: {symbols[:5]}...")
+    logger.debug(f"Updating latest data for {len(symbols)} symbols ({timeframe}): {symbols[:5]}...")
 
     # Parse time range
     start_time = args.start_time
@@ -1081,7 +1086,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
             if output_format == "postgres" and postgres_storage is not None:
                 # 检查数据库中的数据完整性
-                if not validate_database_continuity(postgres_storage.engine, "ohlcv_data", symbol, interval_minutes=get_interval_minutes(TIMEFRAME)):
+                if not validate_database_continuity(postgres_storage.engine, "ohlcv_data", symbol, interval_minutes=get_interval_minutes(timeframe)):
                     logger.warning(f"Database data continuity validation failed for {symbol}")
                     data_integrity_ok = False
                 else:
@@ -1089,10 +1094,10 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
             else:
                 # 检查CSV文件中的数据完整性
-                existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
+                existing_df = load_existing_data(symbol, output_dir, timeframe)
                 if existing_df is not None and not existing_df.empty:
                     # 验证数据连续性
-                    if not validate_data_continuity(existing_df, interval_minutes=get_interval_minutes(TIMEFRAME)):
+                    if not validate_data_continuity(existing_df, interval_minutes=get_interval_minutes(timeframe)):
                         logger.warning(f"Data continuity validation failed for {symbol} in CSV files")
                         data_integrity_ok = False
                     else:
@@ -1111,7 +1116,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         WHERE symbol = :symbol AND interval = :interval
                         """)
                         with postgres_storage.engine.connect() as conn:
-                            delete_result = conn.execute(delete_query, {"symbol": symbol, "interval": TIMEFRAME})
+                            delete_result = conn.execute(delete_query, {"symbol": symbol, "interval": timeframe})
                             conn.commit()
                         logger.info(f"Cleared {delete_result.rowcount} existing records for {symbol} from database")
                     else:
@@ -1119,7 +1124,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         import os
                         symbol_safe = symbol.replace("/", "_")
                         dirpath = os.path.join(output_dir, symbol_safe)
-                        filepath = os.path.join(dirpath, f"{symbol_safe}_{TIMEFRAME}.csv")
+                        filepath = os.path.join(dirpath, f"{symbol_safe}_{timeframe}.csv")
                         if os.path.exists(filepath):
                             os.remove(filepath)
                             logger.info(f"Removed existing CSV file for {symbol}: {filepath}")
@@ -1155,7 +1160,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             # Calculate fetch window for this symbol if incremental is enabled
             if enable_incremental:
                 print(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
-                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, TIMEFRAME, output_format, postgres_storage)
+                adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, timeframe, output_format, postgres_storage)
                 print(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}, adjusted_start={adjusted_start}, adjusted_end={adjusted_end}")  # Debug print
                 if not should_fetch:
                     logger.info(f"Skipping {symbol} - no new data needed")
@@ -1210,7 +1215,8 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
                 try:
                     # Use CCXT to fetch OHLCV data
-                    market_symbol = normalize_symbol(symbol)
+                    from scripts.symbol_utils import get_ccxt_symbol
+                    market_symbol = get_ccxt_symbol(normalize_symbol(symbol))
                     # If the exchange has markets loaded and it's a dict, try to find best matching market
                     exchange_markets = getattr(exchange, 'markets', None)
                     if isinstance(exchange_markets, dict):
@@ -1223,7 +1229,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                     break
                     ohlcv = exchange.fetch_ohlcv(
                         market_symbol,
-                        timeframe=TIMEFRAME,
+                        timeframe=timeframe,
                         since=current_since,
                         limit=min(args.limit, 300)  # OKX max limit is 300
                     )
@@ -1246,7 +1252,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         # action == 'continue' - 继续下一轮请求
 
                         # Continue to next request with incremented timestamp
-                        current_since += timeframe_to_ms(TIMEFRAME)  # Skip this empty timeframe slot
+                        current_since += timeframe_to_ms(timeframe)  # Skip this empty timeframe slot
                         
                         # Ensure we don't request data from the future even after empty response handling
                         current_time_ms = int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)
@@ -1297,7 +1303,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                 'low': float(candle[3]),
                                 'close': float(candle[4]),
                                 'volume': float(candle[5]),
-                                'interval': TIMEFRAME
+                                'interval': timeframe
                             })
 
                             if ts_ms > latest_ts:
@@ -1363,7 +1369,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                     FROM ohlcv_data
                                     WHERE symbol = :symbol AND interval = :interval
                                     ORDER BY timestamp
-                                """), {"symbol": symbol, "interval": TIMEFRAME})
+                                """), {"symbol": symbol, "interval": timeframe})
 
                                 existing_data = []
                                 for row in existing_result:
@@ -1386,7 +1392,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                             existing_df = None
                     else:
                         # Load existing data from CSV files
-                        existing_df = load_existing_data(symbol, output_dir, TIMEFRAME)
+                        existing_df = load_existing_data(symbol, output_dir, timeframe)
                     
                     if existing_df is not None and not existing_df.empty:
                         if output_format == "postgres":
@@ -1550,7 +1556,13 @@ async def main(args):
     logger.info(f"Collecting data for {len(symbols)} symbols: {symbols[:5]}...")
 
     # Update the latest data with the provided arguments
-    update_latest_data(symbols, output_dir="data/klines", args=args, output_format=output_format, postgres_storage=postgres_storage)
+    timeframes = args.timeframes.split(',') if getattr(args, 'timeframes', None) else [TIMEFRAME]
+    
+    for tf in timeframes:
+        tf = tf.strip()
+        if not tf: continue
+        logger.info(f"Processing timeframe: {tf}")
+        update_latest_data(symbols, output_dir="data/klines", args=args, output_format=output_format, postgres_storage=postgres_storage, timeframe=tf)
 
     # Create exchange instance: resolve ccxtpro/ccxt dynamically so tests can inject shims via sys.modules.
     exchange = None
@@ -1640,10 +1652,15 @@ async def main(args):
                     try:
                         # Run the (sync) update_latest_data in a thread to avoid blocking the event loop
                         # Add timeout protection to prevent hanging on API calls
-                        await asyncio.wait_for(
-                            asyncio.to_thread(update_latest_data, symbols_list, "data/klines", args, output_format, postgres_storage),
-                            timeout=300.0  # 5 minute timeout for the entire update operation
-                        )
+                        timeframes = args.timeframes.split(',') if getattr(args, 'timeframes', None) else [TIMEFRAME]
+                        for tf in timeframes:
+                            tf = tf.strip()
+                            if not tf: continue
+                            logger.info(f"Polling update for timeframe: {tf}")
+                            await asyncio.wait_for(
+                                asyncio.to_thread(update_latest_data, symbols_list, "data/klines", args, output_format, postgres_storage, tf),
+                                timeout=300.0  # 5 minute timeout for the entire update operation
+                            )
                     except asyncio.TimeoutError:
                         logger.error("Polling update timed out after 5 minutes")
                     except Exception as e:
@@ -1756,26 +1773,30 @@ async def main(args):
     # Subscribe to OHLCV data with timeout protection
     subscription_timeout = 30.0  # 30 seconds to subscribe to all symbols
     try:
+        timeframes = args.timeframes.split(',') if getattr(args, 'timeframes', None) else [TIMEFRAME]
         for symbol in symbols:
-            try:
-                logger.info(f"Subscribing to OHLCV data for {symbol}")
-                await asyncio.wait_for(
-                    exchange.watch_ohlcv(symbol, TIMEFRAME, handle_ohlcv),
-                    timeout=10.0  # 10 second timeout per symbol
-                )
-                logger.debug(f"Successfully subscribed to OHLCV for {symbol}")
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout subscribing to OHLCV for {symbol} after 10 seconds")
-                raise
-            except Exception as e:
-                # Convert ccxt NotSupported (or similar) into a clear RuntimeError
-                if type(e).__name__ == "NotSupported" or "watchOHLCV" in str(e) or "watch_ohlcv" in str(e):
-                    raise RuntimeError(
-                        "Exchange does not support watch_ohlcv at runtime. "
-                        "Use ccxtpro.okx (supports websockets) or a test shim that provides websocket methods."
-                    ) from e
-                logger.error(f"Failed to subscribe to OHLCV for {symbol}: {e}")
-                raise
+            for tf in timeframes:
+                tf = tf.strip()
+                if not tf: continue
+                try:
+                    logger.info(f"Subscribing to OHLCV data for {symbol} {tf}")
+                    await asyncio.wait_for(
+                        exchange.watch_ohlcv(symbol, tf, handle_ohlcv),
+                        timeout=10.0  # 10 second timeout per symbol and timeframe
+                    )
+                    logger.debug(f"Successfully subscribed to OHLCV for {symbol} {tf}")
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout subscribing to OHLCV for {symbol} after 10 seconds")
+                    raise
+                except Exception as e:
+                    # Convert ccxt NotSupported (or similar) into a clear RuntimeError
+                    if type(e).__name__ == "NotSupported" or "watchOHLCV" in str(e) or "watch_ohlcv" in str(e):
+                        raise RuntimeError(
+                            "Exchange does not support watch_ohlcv at runtime. "
+                            "Use ccxtpro.okx (supports websockets) or a test shim that provides websocket methods."
+                        ) from e
+                    logger.error(f"Failed to subscribe to OHLCV for {symbol}: {e}")
+                    raise
 
         for symbol in symbols:
             try:
@@ -1881,6 +1902,12 @@ parser.add_argument(
     "--verbose-ccxt",
     action="store_true",
     help="Enable verbose CCXT library logging (shows API requests/responses)"
+)
+parser.add_argument(
+    "--timeframes",
+    type=str,
+    default="15m,1h,4h,1d",
+    help="Comma-separated list of timeframes to collect (e.g., '15m,1h,4h,1d')"
 )
 
 if __name__ == '__main__':

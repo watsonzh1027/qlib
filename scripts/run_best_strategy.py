@@ -8,8 +8,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run training and backtest using best parameters from workflow.best.json")
     parser.add_argument("--symbol", default="ETHUSDT", help="Symbol to use (must exist in per_symbol_models)")
     parser.add_argument("--config", default="config/workflow.best.json", help="Path to best config file")
-    parser.add_argument("--start", default="2025-01-01", help="Backtest start date")
-    parser.add_argument("--end", default="2025-12-31", help="Backtest end date")
+    parser.add_argument("--start", default="2024-01-01", help="Backtest start date")
+    parser.add_argument("--end", default="2024-12-31", help="Backtest end date")
+    parser.add_argument("--leverage", type=float, help="Override leverage (e.g. 1.0)")
+    parser.add_argument("--threshold", type=float, help="Override signal threshold (e.g. 0.002)")
     args = parser.parse_args()
 
     # Resolve paths
@@ -40,6 +42,15 @@ def main():
     # Overwrite strategy params
     print(f"  -> Updating Strategy params: {best_params['trading']}")
     base_config["strategy"].update(best_params["trading"])
+    
+    # Allow Manual Override for Robustness Testing
+    if args.leverage is not None:
+        print(f"  ⚠️ Overriding Leverage: {args.leverage}")
+        base_config["strategy"]["leverage"] = args.leverage
+        
+    if args.threshold is not None:
+        print(f"  ⚠️ Overriding Threshold: {args.threshold}")
+        base_config["strategy"]["signal_threshold"] = args.threshold
     
     # 2. Update Model Params
     if "training" in base_config and "models" in base_config["training"]:
@@ -72,11 +83,12 @@ def main():
     print("🚀 STEP 1: Retraining Model with Best Parameters")
     print("="*50)
     
-    # Define training period (Hardcoded default strategy: Train up to 2023-12-31 for 2024 Backtest)
-    # Ideally should be dynamic but let's stick to the request context
-    train_start = "2020-01-01"
-    train_end = "2023-12-31"
-    valid_start = "2023-01-01"
+    # Define training period (Standard 2024 Backtest Setup)
+    # Train: 2021-01-01 -> 2023-10-31
+    # Valid: 2023-11-01 -> 2023-12-31
+    train_start = "2021-01-01"
+    train_end = "2023-10-31"
+    valid_start = "2023-11-01"
     valid_end = "2023-12-31"
 
     cmd_train = [

@@ -22,6 +22,7 @@ sys.path.insert(0, str(project_root))
 
 from scripts.config_manager import ConfigManager
 from scripts.dump_bin import DumpDataAll  # Import DumpDataAll for binary conversion
+from scripts.symbol_utils import normalize_symbol  # Import symbol normalization
 
 
 def calculate_proportion_segments(start_date, end_date, proportions):
@@ -435,7 +436,7 @@ class DumpDataCrypto(DumpDataAll):
         calendar_path = self._features_dir.parent / 'calendars' / f'{self.freq}.txt'
         if calendar_path.exists():
             with open(calendar_path, 'r') as f:
-                calendar_timestamps = [pd.Timestamp(line.strip()) for line in f.readlines()]
+                calendar_timestamps = [pd.Timestamp(line.strip()).replace(tzinfo=None) for line in f.readlines()]
             
             # Convert data index to naive datetime (remove timezone) to match calendar
             _df.index = _df.index.tz_localize(None)
@@ -615,8 +616,18 @@ def convert_to_qlib(source: str = None):
     symbol_field_name = "symbol"  # Assuming default, can be added to config if needed
     
     # Get interval from config and convert to qlib frequency
-    interval = data_collection.get("interval", "1h")
-    target_freq = config.get("workflow", {}).get("frequency", "60min")  # Use workflow frequency
+    if source == 'db':
+        # If using DB source, try to infer source interval from target frequency
+        target_freq = config.get("workflow", {}).get("frequency", "60min")
+        interval_map = {"1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "60min": "1h", "240min": "4h", "1day": "1d"}
+        interval = interval_map.get(target_freq, data_collection.get("interval", "1h"))
+        logger.info(f"Inferred DB interval '{interval}' from target frequency '{target_freq}'")
+    else:
+        interval = data_collection.get("interval", "1h")
+        target_freq = config.get("workflow", {}).get("frequency", "60min")  # Use workflow frequency
+    
+    # Get market type for hierarchical structure
+    market_type = data_config.get("market_type", "future")
     
     # Determine exclude fields: all columns except include_fields + symbol + date
     exclude_fields_list = [date_field_name, symbol_field_name]
@@ -715,14 +726,19 @@ def convert_to_qlib(source: str = None):
                     # Validate data quality
                     quality_stats = db_storage.validate_data_quality(df)
                     if quality_stats['valid']:
+                        # Normalize and format symbol to match project directory structure
+                        # e.g. ETHUSDT -> ETH_USDT/240min/FUTURE
+                        norm_symbol = normalize_symbol(symbol)
+                        qlib_symbol = f"{norm_symbol}/{target_freq}/{market_type.upper()}"
+
                         # Merge with existing data if both sources
-                        if symbol in all_data:
+                        if qlib_symbol in all_data:
                             # Concatenate and deduplicate
-                            combined_df = pd.concat([all_data[symbol], df]).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
-                            all_data[symbol] = combined_df
+                            combined_df = pd.concat([all_data[qlib_symbol], df]).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
+                            all_data[qlib_symbol] = combined_df
                         else:
-                            all_data[symbol] = df
-                        logger.info(f"Loaded from DB - Symbol: {symbol}, Records: {len(df)}")
+                            all_data[qlib_symbol] = df
+                        logger.info(f"Loaded from DB - Symbol: {qlib_symbol} (Raw: {symbol}), Records: {len(df)}")
                     else:
                         logger.warning(f"Data quality issues for {symbol}: {quality_stats['issues']}")
     
