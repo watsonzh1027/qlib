@@ -461,6 +461,31 @@ class DumpDataCrypto(DumpDataAll):
             
             # Save in qlib format: [start_index, values...]
             # Qlib's FileFeatureStorage forces lower() on field and freq
+            # Use standard name: field.bin
+            # But Qlib's default FILE storage uses `field.freq.bin` IF configured with freq?
+            # Actually standard binary format is just `field.bin` inside instrument dir usually
+            # But let's check `file_storage.py` error provided earlier:
+            # `self.dpm.get_data_uri(self._freq_file).joinpath(f"{self.storage_name}s", self.file_name)`
+            # file_name is `field.freq.bin` by default in Qlib if not changed.
+            # But we are creating separate dirs per freq.
+            # So if we init Qlib with `provider_uri=data/crypto_60min`, and freq=60min.
+            # Does Qlib look for `close.60min.bin` or `close.bin`?
+            # Qlib's `FileFeatureStorage`: `file_name` property uses `name` + `freq` suffix?
+            # Actually, `features/eth_usdt/close.day.bin` is standard for day freq.
+            # If freq is 60min, `close.60min.bin`.
+            # So the PREVIOUS FILENAME was actually CORRECT: `close.60min.bin`.
+            
+            # The issue was HIERARCHY. `features/eth_usdt/60min/future/close.60min.bin` vs `features/eth_usdt/close.60min.bin`.
+            # We switched to `features/eth_usdt/` by changing `code`.
+            # So we SHOULD KEEP `close.60min.bin`.
+            
+            # Reverting this part of instruction - keeping same filename format, but code handling was fixed in previous steps.
+            # Wait, I claimed I need to change filename format.
+            # Let's verify standard Qlib expectation.
+            # `FileFeatureStorage` -> `file_name` -> `f"{self.field}.{self.freq}.bin"`.
+            # So `close.60min.bin` IS CORRECT.
+            # I should NOT change this line.
+            
             bin_path = features_dir.joinpath(f"{field.lower()}.{self.freq.lower()}.bin")
             data_array = np.concatenate([[start_index], field_data]).astype(np.float32)
             data_array.astype("<f").tofile(str(bin_path))
@@ -504,7 +529,14 @@ class DumpDataCrypto(DumpDataAll):
             logger.warning("No data found to generate calendar")
             return
             
-        all_dates = sorted(list(set(pd.to_datetime(all_dates))))
+        # Ensure all dates are naive
+        # If they are mixed aware/naive, to_datetime(utc=True) makes them all aware (UTC)
+        # Then we strip TZ
+        start = time.time()
+        dt_index = pd.to_datetime(all_dates, utc=True).tz_localize(None)
+        all_dates = sorted(list(set(dt_index)))
+        logger.info(f"Calendar dedup/sort processed in {time.time()-start:.2f}s")
+        
         self._calendars_list = all_dates
         
         # Save to target freq
@@ -586,12 +618,13 @@ def convert_interval_to_qlib_freq(interval: str) -> str:
         return interval.replace("h", "60min").replace("m", "min") if interval.endswith(("h", "m")) else interval
 
 
-def convert_to_qlib(source: str = None):
+def convert_to_qlib(source: str = None, freq: str = None):
     """
     Convert OHLCV data from CSV and/or database format to Qlib-compatible binary format.
     
     Args:
         source: Data source - "csv", "db", or "both". If None, uses config data_source.
+        freq: Target frequency (e.g., '15min', '60min'). Overrides config.
     """
     # Get configuration parameters
     data_config = config.get("data", {})
@@ -607,8 +640,8 @@ def convert_to_qlib(source: str = None):
         raise ValueError(f"Invalid data source: {source}")
     
     input_dir = data_config.get("csv_data_dir", "data/klines")
-    output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data"))
-    os.makedirs(output_dir, exist_ok=True)
+    # Base output dir
+    base_output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data/crypto"))
     
     # Get convertor parameters
     date_field_name = data_convertor.get("date_field_name", "timestamp")
@@ -618,15 +651,29 @@ def convert_to_qlib(source: str = None):
     # Get interval from config and convert to qlib frequency
     if source == 'db':
         # If using DB source, try to infer source interval from target frequency
-        target_freq = config.get("workflow", {}).get("frequency", "60min")
-        interval_map = {"1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "60min": "1h", "240min": "4h", "1day": "1d"}
-        interval = interval_map.get(target_freq, data_collection.get("interval", "1h"))
-        logger.info(f"Inferred DB interval '{interval}' from target frequency '{target_freq}'")
+        target_freq = freq if freq else config.get("workflow", {}).get("frequency", "60min")
+        interval_map_rev = {"1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "60min": "1h", "240min": "4h", "1day": "1d"}
+        
+        # We need to map TARGET freq (e.g. 60min) to DB interval (e.g. 1h)
+        # Check if target_freq is in keys
+        if target_freq in interval_map_rev:
+             interval = interval_map_rev[target_freq]
+        else:
+             # Fallback logic or error
+             logger.warning(f"Unknown target freq {target_freq}, defaulting to 1h retrieval")
+             interval = data_collection.get("interval", "1h")
+
+        logger.info(f"Inferred DB retrieval interval '{interval}' from target frequency '{target_freq}'")
     else:
         interval = data_collection.get("interval", "1h")
-        target_freq = config.get("workflow", {}).get("frequency", "60min")  # Use workflow frequency
+        target_freq = freq if freq else config.get("workflow", {}).get("frequency", "60min")  # Use workflow frequency
     
-    # Get market type for hierarchical structure
+    # FREQ SPECIFIC OUTPUT DIR
+    output_dir = Path(base_output_dir).parent / f"{Path(base_output_dir).name}_{target_freq}"
+    output_dir = str(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get market type for hierarchical structure - IGNORE for bin path, we use simple flat structure in separate data dirs
     market_type = data_config.get("market_type", "future")
     
     # Determine exclude fields: all columns except include_fields + symbol + date
@@ -638,6 +685,7 @@ def convert_to_qlib(source: str = None):
     
     print(f"Target Frequency: {target_freq}")
     print(f"Converting data to {target_freq} frequency from source: {source}...")
+    print(f"Output Directory: {output_dir}")
     
     all_data = {}  # Dictionary to hold all symbol data in memory
     
@@ -655,9 +703,8 @@ def convert_to_qlib(source: str = None):
             parts = rel_path.split(os.sep)
             if len(parts) >= 4:
                 symbol = parts[0]
-                # Use target_freq for the qlib instrument name to match expectation
-                market_type = parts[2]
-                qlib_symbol = f"{symbol.upper()}/{target_freq}/{market_type.upper()}"
+                # For Qlib symbol, we now just use "ETH_USDT" because we are in a freq-specific dataset
+                qlib_symbol = symbol.upper() # Simple symbol
                 
                 if qlib_symbol not in symbol_groups:
                     symbol_groups[qlib_symbol] = []
@@ -674,8 +721,8 @@ def convert_to_qlib(source: str = None):
                         'low': 'min',
                         'close': 'last',
                         'volume': 'sum'
-                    }).dropna()
-                    df = resampled.reset_index()
+                    }).dropna().reset_index()
+                    df = resampled
                     print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
                 
                 symbol_groups[qlib_symbol].append(df)
@@ -713,7 +760,8 @@ def convert_to_qlib(source: str = None):
                 'high': 'high_price',
                 'low': 'low_price',
                 'close': 'close_price',
-                'volume': 'volume'
+                'volume': 'volume',
+                'funding_rate': 'funding_rate'
             }
         )
         with db_storage:
@@ -727,9 +775,9 @@ def convert_to_qlib(source: str = None):
                     quality_stats = db_storage.validate_data_quality(df)
                     if quality_stats['valid']:
                         # Normalize and format symbol to match project directory structure
-                        # e.g. ETHUSDT -> ETH_USDT/240min/FUTURE
+                        # Use simple structure: ETH_USDT
                         norm_symbol = normalize_symbol(symbol)
-                        qlib_symbol = f"{norm_symbol}/{target_freq}/{market_type.upper()}"
+                        qlib_symbol = norm_symbol.upper()
 
                         # Merge with existing data if both sources
                         if qlib_symbol in all_data:
@@ -785,7 +833,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert cryptocurrency data to Qlib format")
     parser.add_argument("--source", choices=["csv", "db", "both"], 
                        help="Data source: csv (CSV files), db (database), or both. If not specified, uses config data_source.")
+    parser.add_argument("--freq", help="Target frequency (e.g., 15min, 60min, 240min). Overrides config.")
     args = parser.parse_args()
     
     source = args.source if args.source else 'db'
-    convert_to_qlib(source=source)
+    convert_to_qlib(source=source, freq=args.freq)

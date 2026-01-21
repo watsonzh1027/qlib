@@ -901,6 +901,9 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 		output_format = _global_output_format
 	if postgres_storage is None:
 		postgres_storage = _global_postgres_storage
+	
+	print(f"DEBUG: save_klines called for {symbol}. Entries: {len(entries) if entries else 0}, Format: {output_format}")
+
 	global klines
 	if klines is None:
 		klines = {}

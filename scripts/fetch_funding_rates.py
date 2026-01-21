@@ -13,6 +13,9 @@ import os
 import sys
 import json
 from pathlib import Path
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import execute_batch
 
 CUR_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CUR_DIR.parent
@@ -38,15 +41,134 @@ except ImportError:
         def get(self, s, k, d=None): return d
         def get_with_defaults(self, s, k, d=None): return d
 
+class PostgreSQLStorage:
+    def __init__(self, host, port, database, user, password):
+        self.conn_params = {
+            "host": host, "port": port, "database": database, "user": user, "password": password
+        }
+        self.conn = None
+
+    def connect(self):
+        if not self.conn:
+            self.conn = psycopg2.connect(**self.conn_params)
+            self.conn.autocommit = True
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def ensure_table(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS funding_rates (
+                    symbol VARCHAR(50),
+                    timestamp TIMESTAMP WITH TIME ZONE,
+                    funding_rate DOUBLE PRECISION,
+                    funding_datetime TIMESTAMP WITH TIME ZONE,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (symbol, timestamp)
+                );
+            """)
+            # Ensure index on timestamp for faster merging
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_funding_rates_ts ON funding_rates (timestamp);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_funding_rates_sym ON funding_rates (symbol);")
+
+    def save_data(self, data: list):
+        if not data: return
+        self.connect()
+        self.ensure_table()
+        
+        # Prepare data for insertion
+        # data is list of dicts: timestamp (ms), datetime, symbol, funding_rate, funding_datetime
+        
+        # Convert ms timestamp to datetime if needed, but DB expects timestamp
+        # Actually our `all_funding_rates` has 'timestamp' as int ms. DB column is TIMESTAMP WITH TIME ZONE.
+        # We should convert in python or let postgres handle to_timestamp(val/1000.0)
+        
+        rows = []
+        for d in data:
+            ts = pd.to_datetime(d['timestamp'], unit='ms', utc=True)
+            f_dt = d['funding_datetime']
+            if f_dt:
+                if isinstance(f_dt, (int, float)):
+                     f_dt = pd.to_datetime(f_dt, unit='ms', utc=True)
+                else:
+                     f_dt = pd.to_datetime(f_dt, utc=True)
+            
+            rows.append((
+                d['symbol'],
+                ts,
+                d['funding_rate'],
+                f_dt
+            ))
+
+        query = """
+            INSERT INTO funding_rates (symbol, timestamp, funding_rate, funding_datetime)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (symbol, timestamp) 
+            DO UPDATE SET funding_rate = EXCLUDED.funding_rate, funding_datetime = EXCLUDED.funding_datetime, updated_at = CURRENT_TIMESTAMP;
+        """
+        
+        with self.conn.cursor() as cur:
+            execute_batch(cur, query, rows, page_size=1000)
+        print(f"Saved {len(rows)} funding rate records to database.")
+
+    def merge_with_ohlcv(self, symbol):
+        """
+        Merge funding rates into ohlcv_data table for the given symbol.
+        Uses a correlated subquery to fill funding_rate from the latest previous funding_rates record.
+        """
+        self.connect()
+        
+        # 1. Add column if not exists
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE ohlcv_data 
+                ADD COLUMN IF NOT EXISTS funding_rate DOUBLE PRECISION;
+            """)
+        
+        print(f"Merging funding rates for {symbol} in DB (This may take a while)...")
+        # 2. Update
+        # Optimize: only update rows where funding_rate is NULL? Or update all to ensure correctness?
+        # User implies "merge", usually meaning fill.
+        
+        # Note: ohlcv_data has 'symbol', 'timestamp' (timestamptz). funding_rates has 'symbol', 'timestamp'.
+        # We match on symbol and find max(fr.timestamp) <= ohlcv.timestamp
+        
+        query = """
+        UPDATE ohlcv_data o
+        SET funding_rate = (
+            SELECT f.funding_rate
+            FROM funding_rates f
+            WHERE f.symbol = o.symbol
+              AND f.timestamp <= o.timestamp
+            ORDER BY f.timestamp DESC
+            LIMIT 1
+        )
+        WHERE o.symbol = %s;
+        """
+        # Note: this global update can be very slow.
+        # A more efficient way might be extracting to temp table, but let's try direct update first.
+        # Adding an index on ohlcv_data(symbol, timestamp) helps if not exists.
+        
+        with self.conn.cursor() as cur:
+            cur.execute(query, (symbol,))
+            print(f"Updated {cur.rowcount} rows in ohlcv_data for {symbol}.")
+
+
 def fetch_funding_rate_history(
     symbol: str = "BTC/USDT:USDT",
     exchange_name: str = "binance",
     start_date: str = "2024-01-01",
     end_date: str = "2025-01-01",
-    output_dir: str = "data/funding_rates"
+    output_dir: str = "data/funding_rates",
+    output_format: str = "csv",
+    db_config: dict = None
 ):
     """
     Get historical funding rate data from the specified exchange.
+    output_format: "csv" or "db"
     """
     
     # Initialize exchange
@@ -141,6 +263,72 @@ def fetch_funding_rate_history(
     df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     
+    if output_format == "db" and db_config:
+        # Save to DB
+        storage = PostgreSQLStorage(**db_config)
+        # Normalize symbol for storage if needed? 
+        # Usually we store raw CCXT symbol or normalized? 
+        # okx_data_collector stores "ETHUSDT" (raw) but convert_to_qlib expects that.
+        # Here we have "BTC/USDT:USDT".
+        # Let's save as-is or normalize. kline data uses "ETHUSDT" (no slash).
+        # We should align with kline data symbol format which is typically "ETHUSDT" for Spot, "ETH-USDT-SWAP" for OKX?
+        # Wait, okx_data_collector uses `normalize_symbol` which removes slashes "ETH_USDT".
+        # Let's strip slashes/colons to match typical qlib raw symbol 'ATP'.
+        # Actually okx_data_collector uses `symbol` passed in `update_latest_data`. 
+        # It's better to verify what symbol is in `ohlcv_data`.
+        # convert_to_qlib says: `Loaded from DB - Symbol: ETH_USDT/240min/FUTURE (Raw: ETHUSDT)`
+        # So raw symbol in DB is "ETHUSDT".
+        
+        # We should convert "BTC/USDT:USDT" -> "BTCUSDT" for DB matching?
+        # Or "BTC-USDT-SWAP"?
+        # OKX symbol in CCXT is "BTC/USDT:USDT".
+        # okx_data_collector `normalize_symbol` -> "BTC_USDT".
+        # But `scripts/symbol_utils.py` says `normalize_symbol` returns "BTC_USDT".
+        # `convert_to_qlib` logs valid `Raw: ETHUSDT`. 
+        # It seems `okx_data_collector` saves `symbol` provided in symbol list locally which is "ETHUSDT" (from user input or config).
+        # User config has "BTC_USDT/240min/FUTURE".
+        # So we should probably use `normalize_symbol(symbol)` from `symbol_utils` which gives "BTC_USDT".
+        # Let's check `scripts/symbol_utils.py` again.
+        # `normalize_symbol("BTC/USDT:USDT")` -> "BTC_USDT"?
+        # lines 19: replace / with _. -> "BTC_USDT:USDT".
+        # It doesn't strip :USDT.
+        # "ETHUSDT" -> "ETH_USDT" (line 30).
+        
+        # We need to make sure the symbol stored in `funding_rates` MATCHES `ohlcv_data`.
+        # If `ohlcv_data` has "ETHUSDT" (no underscore), we should use that.
+        # BUT `symbol_utils.py` logic `normalize_symbol` tries to add underscore if missing for known quotes.
+        # Let's trust `normalize_symbol` for now but remove :USDT if present.
+        
+        save_sym = symbol.split(':')[0]
+        if '/' in save_sym: save_sym = save_sym.replace('/', '')
+        if '_' in save_sym: save_sym = save_sym.replace('_', '')
+        # "BTCUSDT"
+        
+        # Re-apply `normalize_symbol` logic might produce "BTC_USDT".
+        # Let's check what `okx_data_collector` saves. It saves `symbol` iterating over `symbols`.
+        # Config has `symbols` list.
+        # If we run with `--all`, we get symbols from config.
+        # Currently config has `BTC_USDT/240min/FUTURE`.
+        # `process_all_from_config` parses this to `base_sym`="BTC_USDT".
+        # Then calls fetch using `ccxt_sym`.
+        # We should store using `base_sym` ("BTC_USDT") or simplified "BTCUSDT".
+        # Ideally we stick to what `ohlcv_data` has.
+        # We previously saw `okx_data_collector` dumping "ETHUSDT" (no underscore) in logs?
+        # Stop. check logs Step 200: `Loaded from DB - Symbol: ETH_USDT/240min/FUTURE (Raw: ETHUSDT)`
+        # So raw is `ETHUSDT` (no underscore).
+        # So we should strip underscores.
+        
+        db_symbol = symbol.split(':')[0].replace('/', '').replace('_', '')
+        
+        # Update symbol in all_funding_rates for DB save
+        for fr in all_funding_rates:
+            fr['symbol'] = db_symbol
+            
+        storage.save_data(all_funding_rates)
+        storage.close()
+        print(f"Saved to DB table funding_rates for {db_symbol}")
+        return df
+
     # Save to CSV
     symbol_base = symbol.split(':')[0] if ':' in symbol else symbol
     symbol_clean = normalize_symbol(symbol_base)
@@ -219,6 +407,16 @@ def process_all_from_config(config_path):
     interval = cm.get("data_collection", "interval", "1h")
     market_type = cm.get("data", "market_type", "future")
     
+    # DB Config
+    db_cfg = config.get("database") or {}
+    use_db = db_cfg.get("use_db", False)
+    # Map 'qlib_crypto' or whatever strict keys
+    db_config_clean = None
+    if use_db:
+         db_config_clean = {k: v for k,v in db_cfg.items() if k in ['host','port','database','user','password']}
+
+    # Allow simple mappings
+    
     # Allow simple mappings
     if interval == "60min": interval = "1h"
     if interval == "1440min": interval = "1d"
@@ -268,11 +466,24 @@ def process_all_from_config(config_path):
         
         fetch_funding_rate_history(
             symbol=ccxt_sym,
-            exchange_name="okx", # Default to OKX as per recent context
+            exchange_name="okx", # Default to OKX per context
             start_date=start_time,
             end_date=end_time,
-            output_dir=csv_data_dir
+            output_dir=csv_data_dir,
+            output_format="db" if use_db else "csv",
+            db_config=db_config_clean
         )
+        
+        if use_db and db_config_clean:
+             # DB Merge
+             # We use base_sym e.g. "BTC_USDT" -> "BTCUSDT"
+             db_symbol = base_sym.replace('_', '')
+             storage = PostgreSQLStorage(**db_config_clean)
+             storage.merge_with_ohlcv(db_symbol)
+             storage.close()
+             continue
+        
+        # 2. CSV Merge (Legacy)
         
         # 2. Merge
         # Construct path to OHLCV
@@ -306,6 +517,7 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--start', type=str, default='2023-01-01')
     parser.add_argument('-e', '--end', type=str, default=datetime.now().strftime('%Y-%m-%d'))
     parser.add_argument('-o', '--output', type=str, default='data/funding_rates')
+    parser.add_argument('--format', type=str, default='csv', choices=['csv', 'db'])
     parser.add_argument('--merge', action='store_true')
     parser.add_argument('--ohlcv-file', type=str)
     parser.add_argument('--merge-output', type=str)
@@ -336,10 +548,23 @@ if __name__ == "__main__":
             exchange_name=args.exchange,
             start_date=args.start,
             end_date=args.end,
-            output_dir=args.output
+            output_dir=args.output,
+            output_format=args.format,
+            db_config=ConfigManager(args.config).load_config().get('database') if args.format=='db' else None
         )
         
-        if args.merge and args.ohlcv_file:
+        if args.format == 'db' and args.merge:
+             # Assume db_config is valid if format is db
+             cfg = ConfigManager(args.config).load_config().get('database')
+             storage = PostgreSQLStorage(
+                 host=cfg.get('host'), port=cfg.get('port'), database=cfg.get('database'), user=cfg.get('user'), password=cfg.get('password')
+             )
+             # db_symbol normalization: strip :USDT, strip _ and /
+             db_symbol = args.symbol.split(':')[0].replace('/', '').replace('_', '')
+             storage.merge_with_ohlcv(db_symbol)
+             storage.close()
+
+        if args.format == 'csv' and args.merge and args.ohlcv_file:
              if df.empty:
                 print("No funding data, skipping merge.")
              else:

@@ -1,0 +1,91 @@
+{
+    "qlib_init": {
+        "provider_uri": "data/qlib_data/crypto",
+        "region": "cn",
+        "logging_level": "INFO"
+    },
+    "market": "crypto",
+    "benchmark": "BTC_USDT",
+    "data_handler_config": {
+        "start_time": "2020-01-01",
+        "end_time": "2025-12-31",
+        "fit_start_time": "2020-01-01",
+        "fit_end_time": "2025-12-31",
+        "instruments": [
+            "ETH_USDT"
+        ],
+        "infer_processors": [
+            {
+                "class": "RobustZScoreNorm",
+                "kwargs": {
+                    "fields_group": "feature",
+                    "clip_outlier": true
+                }
+            },
+            {
+                "class": "Fillna",
+                "kwargs": {
+                    "fields_group": "feature"
+                }
+            }
+        ],
+        "learn_processors": [
+            {
+                "class": "DropnaLabel"
+            }
+        ],
+        "process_type": "independent"
+    },
+    "timeframes": {
+        "15min": {
+            "freq": "15min",
+            "label": [
+                "Ref($close, -16) / $close - 1"
+            ],
+            "feature_config": {
+                "class": "Alpha158",
+                "kwargs": {},
+                "module_path": "qlib.contrib.data.handler"
+            }
+        },
+        "60min": {
+            "freq": "60min",
+            "label": [
+                "Ref($close, -4) / $close - 1"
+            ],
+            "feature_config": {
+                "class": "Alpha158",
+                "kwargs": {},
+                "module_path": "qlib.contrib.data.handler"
+            }
+        },
+        "240min": {
+            "freq": "240min",
+            "label": [
+                "Ref($close, -1) / $close - 1"
+            ],
+            "feature_config": {
+                "class": "Alpha158",
+                "kwargs": {},
+                "module_path": "qlib.contrib.data.handler"
+            }
+        }
+    },
+    "model_params": {
+        "boosting_type": "gbdt",
+        "objective": "regression",
+        "metric": "mse",
+        "num_leaves": 31,
+        "max_depth": -1,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "seed": 42,
+        "lambda_l1": 0.1,
+        "lambda_l2": 0.1,
+        "verbose": -1,
+        "early_stopping_rounds": 50,
+        "num_boost_round": 1000
+    }
+}

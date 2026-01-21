@@ -23,15 +23,11 @@ def main():
     qlib.init(provider_uri=provider_uri, region=REG_CN)
 
     # 2. Get Best Params for ETH
-    symbol = "ETH_USDT_4H_FUTURE"
+    symbol = "ETHUSDT"
     q_symbol = symbol
     if symbol not in config["per_symbol_models"]:
-        # Fallback for old key
-        if "ETHUSDT" in config["per_symbol_models"]:
-            best_params = config["per_symbol_models"]["ETHUSDT"]
-        else:
-            print(f"Symbol {symbol} not found in best config!")
-            return
+        print(f"Symbol {symbol} not found in best config!")
+        return
     else:
         best_params = config["per_symbol_models"][symbol]
     
@@ -51,8 +47,8 @@ def main():
     # Ensure times are concrete
     dh_config["start_time"] = "2023-01-01"
     dh_config["end_time"] = "2025-12-31"
-    dh_config["fit_start_time"] = "2023-01-01"
-    dh_config["fit_end_time"] = "2023-12-31"
+    dh_config["fit_start_time"] = "2024-01-01"
+    dh_config["fit_end_time"] = "2024-12-31"
 
     dataset_config = {
         "class": "DatasetH",
@@ -64,8 +60,8 @@ def main():
                 "kwargs": dh_config
             },
             "segments": {
-                "train": ("2023-01-01", "2023-12-31"),
-                "test": ("2024-01-01", "2025-12-31") # Extended test period
+                "train": ("2024-01-01", "2024-12-31"),
+                "test": ("2025-01-01", "2025-12-31") # Extended test period
             }
         }
     }
@@ -107,6 +103,23 @@ def main():
         return s.sort_index()
 
     pred = ensure_index_format(pred)
+
+    # ENFORCE 4H FREQUENCY
+    # Data might be 1H, so we resample to 4H to match strategy intent
+    print("Enforcing 4H frequency on predictions...")
+    if isinstance(pred.index, pd.MultiIndex):
+        # Unstack to get Time as index, Symbol as columns
+        df_pred = pred.unstack(level='instrument')
+        # Resample
+        df_pred = df_pred.resample('4h').first() # Use first signal in block
+        # Stack back
+        pred = df_pred.stack()
+        pred.index.names = ['datetime', 'instrument'] # Stack puts correct names?
+        pred = pred.swaplevel(0, 1).sort_index()
+    else:
+        pred = pred.resample('4h').first()
+    
+    print(f"Resampled Pred Shape: {pred.shape}")
     
     thresh = best_params["trading"]["signal_threshold"]
     with open("tmp/debug_pred.txt", "w") as f:
@@ -153,7 +166,7 @@ def main():
     print("Backtesting...")
     portfolio_metric_dict, indicator_dict = backtest(
         start_time="2024-01-01",
-        end_time="2025-06-01",
+        end_time="2025-12-31",
         strategy=strategy_config,
         executor=executor_config,
         exchange_kwargs={
