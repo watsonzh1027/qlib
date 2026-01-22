@@ -49,6 +49,28 @@ class OHLCVData(Base):
         # Removed schema specification to use default public schema
     )
 
+
+# Funding Rate Data Model
+class FundingRateData(Base):
+    """SQLAlchemy model for funding rate data."""
+    __tablename__ = 'funding_rates'
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), nullable=False)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    funding_rate = Column(Numeric(20, 10), nullable=False)  # Higher precision for funding rates
+    next_funding_time = Column(DateTime(timezone=True))
+    mark_price = Column(Numeric(20, 8))
+    index_price = Column(Numeric(20, 8))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('symbol', 'timestamp', name='unique_funding_symbol_timestamp'),
+        # Removed schema specification to use default public schema
+    )
+
+
 # Configuration
 @dataclass
 class PostgresConfig:
@@ -702,3 +724,234 @@ class PostgreSQLStorage:
         except Exception as e:
             logger.error(f"Failed to get pool stats: {e}")
             return {}
+    
+    def save_funding_rates(
+        self,
+        data: pd.DataFrame,
+        symbol: str
+    ) -> bool:
+        """
+        Save funding rate data to PostgreSQL with duplicate handling.
+
+        Args:
+            data: DataFrame with funding rate data
+            symbol: Trading pair symbol (e.g., 'BTC-USDT')
+
+        Returns:
+            True if data saved successfully
+
+        Raises:
+            DataValidationError: If data format is invalid
+            DatabaseError: If save operation fails
+        """
+        try:
+            # Validate input
+            if data.empty:
+                logger.warning("Empty funding rate data provided, skipping save")
+                return True
+
+            # Required columns for funding rates
+            required_cols = ['timestamp', 'funding_rate']
+            missing_cols = [col for col in required_cols if col not in data.columns]
+            if missing_cols:
+                raise DataValidationError(f"Missing required columns: {missing_cols}")
+
+            # Prepare data for insertion
+            records = []
+            for _, row in data.iterrows():
+                # Ensure timestamp is a proper Python datetime with UTC timezone
+                timestamp = row['timestamp']
+                if isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.to_pydatetime()
+                elif not isinstance(timestamp, datetime):
+                    timestamp = pd.to_datetime(timestamp, utc=True).to_pydatetime()
+                
+                # Ensure it's UTC timezone-aware
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                else:
+                    timestamp = timestamp.astimezone(timezone.utc)
+                
+                # Handle next_funding_time if present
+                next_funding_time = row.get('next_funding_time')
+                if next_funding_time and not pd.isna(next_funding_time):
+                    if isinstance(next_funding_time, pd.Timestamp):
+                        next_funding_time = next_funding_time.to_pydatetime()
+                    elif not isinstance(next_funding_time, datetime):
+                        next_funding_time = pd.to_datetime(next_funding_time, utc=True).to_pydatetime()
+                    
+                    if next_funding_time.tzinfo is None:
+                        next_funding_time = next_funding_time.replace(tzinfo=timezone.utc)
+                    else:
+                        next_funding_time = next_funding_time.astimezone(timezone.utc)
+                else:
+                    next_funding_time = None
+                
+                record = {
+                    'symbol': symbol,
+                    'timestamp': timestamp,
+                    'funding_rate': row['funding_rate'],
+                    'next_funding_time': next_funding_time,
+                    'mark_price': row.get('mark_price'),
+                    'index_price': row.get('index_price')
+                }
+                records.append(record)
+
+            # Bulk insert with ON CONFLICT DO UPDATE (update if newer data)
+            with self._get_session() as session:
+                insert_sql = text("""
+                    INSERT INTO funding_rates (
+                        symbol, timestamp, funding_rate, next_funding_time,
+                        mark_price, index_price
+                    ) VALUES (
+                        :symbol, :timestamp, :funding_rate, :next_funding_time,
+                        :mark_price, :index_price
+                    )
+                    ON CONFLICT (symbol, timestamp) DO UPDATE SET
+                        funding_rate = EXCLUDED.funding_rate,
+                        next_funding_time = EXCLUDED.next_funding_time,
+                        mark_price = EXCLUDED.mark_price,
+                        index_price = EXCLUDED.index_price,
+                        updated_at = NOW()
+                """)
+
+                # Insert in batches
+                batch_size = 1000
+                inserted_count = 0
+
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    try:
+                        session.execute(insert_sql, batch)
+                        inserted_count += len(batch)
+                    except IntegrityError as e:
+                        logger.warning(f"Batch insert failed, trying individual inserts: {e}")
+                        for record in batch:
+                            try:
+                                session.execute(insert_sql, [record])
+                                inserted_count += 1
+                            except IntegrityError:
+                                pass
+
+                session.commit()
+
+                logger.info(f"Successfully saved {inserted_count} funding rate records for {symbol}")
+                return True
+
+        except DataValidationError:
+            raise
+        except IntegrityError as e:
+            logger.warning(f"Data integrity issue: {e}")
+            raise DuplicateDataError("Duplicate funding rate data detected") from e
+        except SQLAlchemyError as e:
+            logger.error(f"Database error during save: {e}")
+            raise DatabaseError(f"Failed to save funding rate data: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error during save: {e}")
+            raise DatabaseError(f"Unexpected error: {e}") from e
+    
+    def get_funding_rates(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime
+    ) -> pd.DataFrame:
+        """
+        Retrieve funding rate data for specified symbol and time range.
+
+        Args:
+            symbol: Trading pair symbol
+            start_date: Start of time range (UTC)
+            end_date: End of time range (UTC)
+
+        Returns:
+            DataFrame with funding rate data
+
+        Raises:
+            DataNotFoundError: If no data exists for the query
+            DatabaseError: If query fails
+        """
+        try:
+            query = text("""
+                SELECT
+                    symbol, timestamp, funding_rate, next_funding_time,
+                    mark_price, index_price, created_at, updated_at
+                FROM funding_rates
+                WHERE symbol = :symbol
+                  AND timestamp >= :start_date
+                  AND timestamp <= :end_date
+                ORDER BY timestamp ASC
+                LIMIT :max_limit
+            """)
+
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {
+                    'symbol': symbol,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'max_limit': 100000
+                })
+
+                rows = result.fetchall()
+
+            if not rows:
+                raise DataNotFoundError(
+                    f"No funding rate data found for {symbol} between {start_date} and {end_date}"
+                )
+
+            # Convert to DataFrame
+            df = pd.DataFrame(rows, columns=[
+                'symbol', 'timestamp', 'funding_rate', 'next_funding_time',
+                'mark_price', 'index_price', 'created_at', 'updated_at'
+            ])
+
+            # Ensure proper dtypes
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            if 'next_funding_time' in df.columns:
+                df['next_funding_time'] = pd.to_datetime(df['next_funding_time'], utc=True)
+            df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
+            df['updated_at'] = pd.to_datetime(df['updated_at'], utc=True)
+
+            logger.info(f"Retrieved {len(df)} funding rate records for {symbol}")
+            return df
+
+        except DataNotFoundError:
+            raise
+        except SQLAlchemyError as e:
+            logger.error(f"Database error during query: {e}")
+            raise DatabaseError(f"Failed to query funding rate data: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error during query: {e}")
+            raise DatabaseError(f"Unexpected error: {e}") from e
+    
+    def get_latest_funding_rate_timestamp(
+        self,
+        symbol: str
+    ) -> Optional[datetime]:
+        """
+        Get the most recent funding rate timestamp for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Latest timestamp or None if no data exists
+        """
+        try:
+            query = text("""
+                SELECT timestamp
+                FROM funding_rates
+                WHERE symbol = :symbol
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """)
+
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'symbol': symbol})
+                row = result.fetchone()
+
+            return row[0] if row else None
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting latest funding rate timestamp: {e}")
+            raise DatabaseError(f"Failed to get latest funding rate timestamp: {e}") from e

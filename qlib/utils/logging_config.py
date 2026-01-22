@@ -233,7 +233,18 @@ def setup_logging(name: Optional[str] = None, skip_rotation: bool = False, is_su
                 log_path = log_dir / f"{combined_log_base}-1{extension}"
                 mode = 'a'
             
-            max_bytes = int(log_cfg.get("max_bytes", 100 * 1024 * 1024))
+            # Get max_size from config, support string expressions like "1024*1024*10"
+            max_size_config = log_cfg.get("max_size", "100*1024*1024")  # Default 100MB
+            if isinstance(max_size_config, str):
+                try:
+                    # Safely evaluate simple arithmetic expressions
+                    max_bytes = int(eval(max_size_config, {"__builtins__": {}}, {}))
+                except Exception:
+                    # Fallback to default if evaluation fails
+                    max_bytes = 100 * 1024 * 1024
+            else:
+                max_bytes = int(max_size_config)
+            
             file_handler = NumberedRotatingFileHandler(
                 log_path, mode=mode, encoding="utf-8", 
                 maxBytes=max_bytes, backupCount=max_index-1

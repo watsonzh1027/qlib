@@ -4,6 +4,7 @@
         "log_file": "<module.name>",
         "output": "file, console",
         "log_base": "qlib-",
+        "max_size": "1024*1024*10",
         "max_index": 9
     },
     "data": {
@@ -13,15 +14,33 @@
         "market_type": "future",
         "symbols": "config/instruments.json"
     },
+    "data_service": {
+        "enabled": false,
+        "update_interval_minutes": 15,
+        "symbols": "config/instruments.json",
+        "base_interval": "1m",
+        "target_timeframes": [
+            "15min",
+            "60min",
+            "240min"
+        ],
+        "enable_funding_rate": "auto",
+        "enable_validation": true,
+        "enable_auto_convert": true,
+        "max_retries": 3,
+        "retry_delay_seconds": 60,
+        "pid_file": "data/data_service.pid",
+        "status_file": "data/service_status.json"
+    },
     "data_collection": {
-        "interval": "4h",
+        "interval": "1m",
         "api_timeout": 10,
         "start_time": "2020-01-01",
         "end_time": "",
         "limit": 1000,
         "overlap_minutes": 5,
         "enable_incremental": true,
-        "output": "db"
+        "output": "csv"
     },
     "database": {
         "host": "localhost",
@@ -39,7 +58,8 @@
             "low",
             "close",
             "volume",
-            "vwap"
+            "vwap",
+            "funding_rate"
         ],
         "instruments_file": "instruments.txt",
         "data_source": "db"
@@ -255,11 +275,11 @@
                 "max_depth": 11
             },
             "trading": {
-                "leverage": 1,
-                "signal_threshold": 0.015898790620459933,
-                "stop_loss": -0.049287366115485176,
-                "take_profit": 0.29509612377129213,
-                "min_sigma_threshold": 0.41306898693526756
+                "leverage": 3,
+                "signal_threshold": 0.00015469069978070563,
+                "stop_loss": -0.03845367910386872,
+                "take_profit": 0.06510879873958267,
+                "min_sigma_threshold": 0.35870912638779123
             },
             "backtest_topk": 3
         }

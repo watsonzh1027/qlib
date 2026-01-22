@@ -94,6 +94,46 @@ class ChangeInstrument(ElemOperator):
         return self.feature.load(instrument, start_index, end_index, *args)
 
 
+class Weekday(ElemOperator):
+    """
+    Weekday Operator
+    Returns the day of the week (0=Monday, 6=Sunday) for each timestamp.
+    Usage: Weekday($close)
+    """
+    def __init__(self, feature):
+        super(Weekday, self).__init__(feature)
+
+    def _load_internal(self, instrument, start_index, end_index, freq=None, *args):
+        from qlib.data import D
+        series = self.feature.load(instrument, start_index, end_index, freq, *args)
+        if isinstance(series.index, pd.DatetimeIndex):
+            vals = series.index.weekday
+        else:
+            cal = D.calendar(freq=freq)
+            vals = pd.to_datetime(cal[series.index]).weekday
+        return pd.Series(vals.astype(float), index=series.index)
+
+
+class Hour(ElemOperator):
+    """
+    Hour Operator
+    Returns the hour of the day (0-23) for each timestamp.
+    Usage: Hour($close)
+    """
+    def __init__(self, feature):
+        super(Hour, self).__init__(feature)
+
+    def _load_internal(self, instrument, start_index, end_index, freq=None, *args):
+        from qlib.data import D
+        series = self.feature.load(instrument, start_index, end_index, freq, *args)
+        if isinstance(series.index, pd.DatetimeIndex):
+            vals = series.index.hour
+        else:
+            cal = D.calendar(freq=freq)
+            vals = pd.to_datetime(cal[series.index]).hour
+        return pd.Series(vals.astype(float), index=series.index)
+
+
 class NpElemOperator(ElemOperator):
     """Numpy Element-wise Operator
 
@@ -1649,6 +1689,8 @@ OpsList = [
     IdxMax,
     IdxMin,
     If,
+    Weekday,
+    Hour,
     Feature,
     PFeature,
 ] + [TResample]

@@ -35,10 +35,10 @@ def get_data_config(train_range, valid_range, test_range):
         "$high/$low - 1",
         "$close/$vwap - 1",
         "($close-Min($low, 10))/(Max($high, 10)-Min($low, 10)+1e-12)", # RSV 10
-        "Sin(2 * 3.1415926 * $weekday / 7)",
-        "Cos(2 * 3.1415926 * $weekday / 7)",
-        "Sin(2 * 3.1415926 * $hour / 24)",
-        "Cos(2 * 3.1415926 * $hour / 24)",
+        "Sin(2 * 3.1415926 * Weekday($close) / 7)",
+        "Cos(2 * 3.1415926 * Weekday($close) / 7)",
+        "Sin(2 * 3.1415926 * Hour($close) / 24)",
+        "Cos(2 * 3.1415926 * Hour($close) / 24)",
     ]
     custom_names = ["range", "vwap_dev", "rsv10", "weekday_sin", "weekday_cos", "hour_sin", "hour_cos"]
 

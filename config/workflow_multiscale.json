@@ -4,6 +4,12 @@
         "region": "cn",
         "logging_level": "INFO"
     },
+    "custom_features": [
+        "Sin(2 * 3.1415926 * Weekday($close) / 7)",
+        "Cos(2 * 3.1415926 * Weekday($close) / 7)",
+        "Sin(2 * 3.1415926 * Hour($close) / 24)",
+        "Cos(2 * 3.1415926 * Hour($close) / 24)"
+    ],
     "market": "crypto",
     "benchmark": "BTC_USDT",
     "data_handler_config": {
@@ -27,11 +33,39 @@
                 "kwargs": {
                     "fields_group": "feature"
                 }
+            },
+            {
+                "class": "Fillna",
+                "kwargs": {
+                    "fields_group": "feature",
+                    "fill_value": 0
+                }
+            },
+            {
+                "class": "CleanNaNInf",
+                "module_path": "qlib.contrib.data.processor_clean",
+                "kwargs": {
+                    "fields_group": "feature"
+                }
             }
         ],
         "learn_processors": [
             {
                 "class": "DropnaLabel"
+            },
+            {
+                "class": "RobustZScoreNorm",
+                "kwargs": {
+                    "fields_group": "label",
+                    "clip_outlier": true
+                }
+            },
+            {
+                "class": "CleanNaNInf",
+                "module_path": "qlib.contrib.data.processor_clean",
+                "kwargs": {
+                    "fields_group": "label"
+                }
             }
         ],
         "process_type": "independent"
@@ -71,21 +105,76 @@
             }
         }
     },
-    "model_params": {
+    "model_type": "xgb",
+    "lgb_params": {
         "boosting_type": "gbdt",
         "objective": "regression",
         "metric": "mse",
         "num_leaves": 31,
         "max_depth": -1,
-        "learning_rate": 0.05,
+        "learning_rate": 0.1,
         "feature_fraction": 0.9,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
         "seed": 42,
-        "lambda_l1": 0.1,
-        "lambda_l2": 0.1,
+        "lambda_l1": 0.0,
+        "lambda_l2": 0.0,
         "verbose": -1,
         "early_stopping_rounds": 50,
         "num_boost_round": 1000
+    },
+    "xgb_params": {
+        "objective": "reg:squarederror",
+        "learning_rate": 0.088,
+        "max_depth": 4,
+        "min_child_weight": 6,
+        "subsample": 0.50,
+        "colsample_bytree": 0.98,
+        "reg_alpha": 2.5e-05,
+        "reg_lambda": 4.3e-05,
+        "gamma": 1.3e-05,
+        "n_estimators": 1000,
+        "seed": 42
+    },
+    "alstm_params": {
+        "d_feat": 162,
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "n_epochs": 100,
+        "lr": 0.001,
+        "batch_size": 2000,
+        "early_stop": 20,
+        "GPU": 0
+    },
+    "lstm_params": {
+        "d_feat": 162,
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "n_epochs": 100,
+        "lr": 0.001,
+        "batch_size": 2000,
+        "early_stop": 20,
+        "GPU": 0
+    },
+    "catboost_params": {
+        "loss": "RMSE",
+        "learning_rate": 0.1,
+        "depth": 6,
+        "iterations": 1000,
+        "l2_leaf_reg": 3,
+        "random_seed": 42
+    },
+    "mlp_params": {
+        "d_feat": 162,
+        "hidden_size": 128,
+        "num_layers": 3,
+        "dropout": 0.1,
+        "n_epochs": 100,
+        "lr": 0.00001,
+        "batch_size": 512,
+        "early_stop": 20,
+        "GPU": 0
     }
 }

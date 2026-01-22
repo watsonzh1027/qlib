@@ -23,6 +23,7 @@ except ImportError:
 # production code must not inject test shims.
 
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone
 import os
 import json
@@ -53,11 +54,31 @@ TIMEFRAME = config.get("data_collection", {}).get("interval", "1m")
 _global_output_format = "csv"
 _global_postgres_storage = None
 
- 
+FETCH_LIMIT = 1000 
 
 # Global variables for output configuration
 _global_output_format = "csv"
 _global_postgres_storage = None
+
+# Global shutdown flag for Ctrl+C handling
+_shutdown_requested = False
+
+def _handle_interrupt(signum, frame):
+    """Handle Ctrl+C gracefully"""
+    global _shutdown_requested
+    import sys
+    if not _shutdown_requested:
+        _shutdown_requested = True
+        print("\n\n⚠️  Interrupt signal received! Finishing current operation and saving data...")
+        print("⚠️  Press Ctrl+C again to force quit (may lose data)\n")
+    else:
+        print("\n\n❌ Force quit! Data may be lost.\n")
+        sys.exit(1)
+
+# Register signal handler
+import signal
+signal.signal(signal.SIGINT, _handle_interrupt)
+signal.signal(signal.SIGTERM, _handle_interrupt)
 
 def set_global_output_config(output_format: str = "csv", postgres_storage: PostgreSQLStorage = None):
     """Set global output configuration for save_klines calls."""
@@ -65,19 +86,13 @@ def set_global_output_config(output_format: str = "csv", postgres_storage: Postg
     _global_output_format = output_format
     _global_postgres_storage = postgres_storage
 
+from qlib.utils.logging_config import setup_logging, startlog, endlog
+
 # Create logs directory
 os.makedirs('logs', exist_ok=True)
 
-# Configure logging to both console and file
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/collector.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# Setup logging with automatic rotation
+logger = startlog(name="okx_data_collector")
 
 # Configure CCXT logging
 def configure_ccxt_logging(verbose: bool = False):
@@ -624,9 +639,9 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     interval_timedelta = pd.Timedelta(minutes=interval_minutes)
 
     # Check if data needs update based on gaps
-    # Only update start if requested start is after existing data (gap in middle) or if no data exists
-    # Don't try to fetch data earlier than what we already have in the database
-    needs_update_start = req_start_ts > first_timestamp and (req_start_ts - first_timestamp) > interval_timedelta
+    # Update start if requested start is BEFORE existing data (need to backfill history)
+    # Update end if requested end is AFTER existing data (need to fetch new data)
+    needs_update_start = req_start_ts < first_timestamp and (first_timestamp - req_start_ts) > interval_timedelta
     needs_update_end = req_end_ts > last_timestamp and (req_end_ts - last_timestamp) > interval_timedelta
 
     # If the gap between requested start and first available data is too large (>30 days),
@@ -825,12 +840,17 @@ def validate_database_continuity(engine, table_name: str, symbol: str, interval_
 def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize kline data by sorting timestamps, removing duplicates, and ensuring proper datetime format.
+    
+    This function handles duplicates that may occur due to:
+    - overlap_minutes feature (intentional overlap for data completeness)
+    - API retries or reconnections
+    - Data collection interruptions and restarts
 
     Args:
         df: DataFrame with kline data containing 'timestamp' column
 
     Returns:
-        Normalized DataFrame with sorted, deduplicated data
+        Normalized DataFrame with sorted, deduplicated data (keeps first occurrence)
     """
     if df.empty:
         return df
@@ -838,13 +858,131 @@ def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.set_index('timestamp', inplace=True)
     df.index = pd.to_datetime(df.index)
-    df = df[~df.index.duplicated(keep="first")]
+    df = df[~df.index.duplicated(keep="first")]  # Remove duplicates, keep first
     df.sort_index(inplace=True)
     df.index.names = ['timestamp']
     return df.reset_index()
 
 # NOTE: The normalize_klines implementation above handles deduplication, sorting, and timestamp parsing.
 # The below no-op implementation was a leftover duplicate and has been removed to preserve the intended behavior.
+
+def validate_downloaded_data(df: pd.DataFrame, symbol: str, interval: str, 
+                            price_jump_threshold: float = 0.5,
+                            volume_jump_threshold: float = 3.0) -> Dict[str, any]:
+    """
+    Validate downloaded OHLCV data quality immediately after download.
+    Integrates checks from check_data_health.py.
+    
+    Args:
+        df: DataFrame with OHLCV data
+        symbol: Trading symbol
+        interval: Time interval
+        price_jump_threshold: Max allowed price change ratio (default 0.5 = 50%)
+        volume_jump_threshold: Max allowed volume change ratio (default 3.0 = 300%)
+    
+    Returns:
+        Dict with validation results: {'valid': bool, 'issues': list, 'warnings': list}
+    """
+    issues = []
+    warnings = []
+    
+    if df.empty:
+        issues.append("DataFrame is empty")
+        return {'valid': False, 'issues': issues, 'warnings': warnings}
+    
+    # 1. Check required columns
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        issues.append(f"Missing required columns: {missing_cols}")
+        return {'valid': False, 'issues': issues, 'warnings': warnings}
+    
+    # 2. Check for missing data (NaN values)
+    for col in required_cols:
+        nan_count = df[col].isnull().sum()
+        if nan_count > 0:
+            warnings.append(f"{col}: {nan_count} NaN values ({nan_count/len(df)*100:.1f}%)")
+    
+    # 3. Check OHLC logic (high >= low, open/close within range)
+    invalid_ohlc = (
+        (df['high'] < df['low']) |
+        (df['open'] < df['low']) |
+        (df['open'] > df['high']) |
+        (df['close'] < df['low']) |
+        (df['close'] > df['high'])
+    ).sum()
+    if invalid_ohlc > 0:
+        issues.append(f"Invalid OHLC relationships in {invalid_ohlc} rows")
+    
+    # 4. Check for negative or zero prices/volumes
+    if (df['open'] <= 0).any() or (df['high'] <= 0).any() or \
+       (df['low'] <= 0).any() or (df['close'] <= 0).any():
+        issues.append("Negative or zero prices detected")
+    
+    if (df['volume'] < 0).any():
+        issues.append("Negative volume detected")
+    
+    # 5. Check for large price jumps (potential data errors)
+    for col in ['open', 'high', 'low', 'close']:
+        pct_change = df[col].pct_change(fill_method=None).abs()
+        max_change = pct_change.max()
+        if max_change > price_jump_threshold:
+            jump_idx = pct_change.idxmax()
+            jump_date = df.loc[jump_idx, 'timestamp'] if 'timestamp' in df.columns else jump_idx
+            warnings.append(
+                f"{col}: Large price jump {max_change:.1%} at {jump_date} "
+                f"(threshold: {price_jump_threshold:.1%})"
+            )
+    
+    # 6. Check for large volume jumps
+    volume_pct_change = df['volume'].pct_change(fill_method=None).abs()
+    max_volume_change = volume_pct_change.max()
+    if max_volume_change > volume_jump_threshold:
+        jump_idx = volume_pct_change.idxmax()
+        jump_date = df.loc[jump_idx, 'timestamp'] if 'timestamp' in df.columns else jump_idx
+        warnings.append(
+            f"volume: Large jump {max_volume_change:.1%} at {jump_date} "
+            f"(threshold: {volume_jump_threshold:.1%})"
+        )
+    
+    # 7. Check data continuity (gaps in timestamps)
+    if 'timestamp' in df.columns:
+        df_sorted = df.sort_values('timestamp').copy()
+        timestamps = pd.to_datetime(df_sorted['timestamp'])
+        interval_minutes = get_interval_minutes(interval)
+        expected_interval = pd.Timedelta(minutes=interval_minutes)
+        
+        diffs = timestamps.diff().dropna()
+        gaps = diffs[diffs > expected_interval * 2]  # Allow 2x tolerance
+        if len(gaps) > 0:
+            warnings.append(f"Found {len(gaps)} gaps in timestamp sequence")
+    
+    # Determine overall validity
+    valid = len(issues) == 0
+    
+    # Log results
+    if valid:
+        if warnings:
+            logger.warning(f"{symbol} ({interval}): Data valid but has {len(warnings)} warnings")
+            for warning in warnings:
+                logger.warning(f"  - {warning}")
+        else:
+            logger.info(f"✅ {symbol} ({interval}): Data validation passed ({len(df)} rows)")
+    else:
+        logger.error(f"❌ {symbol} ({interval}): Data validation FAILED with {len(issues)} issues")
+        for issue in issues:
+            logger.error(f"  - {issue}")
+    
+    return {
+        'valid': valid,
+        'issues': issues,
+        'warnings': warnings,
+        'row_count': len(df),
+        'date_range': {
+            'start': df['timestamp'].min() if 'timestamp' in df.columns else None,
+            'end': df['timestamp'].max() if 'timestamp' in df.columns else None
+        }
+    }
 
 def get_interval_minutes(timeframe: str) -> int:
     """
@@ -944,6 +1082,12 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 			success = postgres_storage.save_ohlcv_data(df, symbol, interval)
 			if success:
 				logger.debug(f"Saved {len(df)} rows to PostgreSQL for {symbol} {interval}")
+				
+				# Validate data quality after saving
+				validation_result = validate_downloaded_data(df, symbol, interval)
+				if not validation_result['valid']:
+					logger.error(f"Data validation failed for {symbol} {interval}: {validation_result['issues']}")
+				
 				# Clear buffer after saving only if we used the module buffer
 				if use_buffer:
 					klines[symbol] = []
@@ -953,40 +1097,224 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 			return False
 
 	else:
-		# Original CSV saving logic
+		# CSV saving logic with smart append detection
 		symbol_safe = symbol.replace("/", "_")
 		dirpath = os.path.join(base_dir, symbol_safe)
 		os.makedirs(dirpath, exist_ok=True)
 		filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
 
-		# If append_only mode and file exists, try to append new data
-		if append_only and os.path.exists(filepath):
+		# Smart append detection: check if we can safely append
+		can_append = False
+		if os.path.exists(filepath) and not append_only:
 			try:
-				# Check if new data timestamps are all after existing data's last timestamp
+				# Get the last timestamp from existing file
 				existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir, interval)
 				if existing_last_ts is not None:
 					new_min_ts = df['timestamp'].min()
-					if new_min_ts > existing_last_ts:
-						# Safe to append - convert to CSV format and append
-						csv_content = df.to_csv(index=False, header=False)
-						with open(filepath, 'a', newline='') as f:
-							f.write(csv_content)
-						logger.debug(f"Appended {len(df)} new rows to {filepath} (append_only mode)")
-						# Clear buffer after saving only if we used the module buffer
-						if use_buffer:
-							klines[symbol] = []
-						return True
+					
+					# Allow small overlap (for overlap_minutes feature) without triggering full merge
+					# Get overlap_minutes from config, default to 5
+					overlap_minutes = config.get("data_collection", {}).get("overlap_minutes", 5)
+					overlap_threshold = pd.Timedelta(minutes=overlap_minutes)
+					
+					# If new data starts within overlap window of existing data end, still allow append
+					# Duplicates will be handled during data loading/conversion
+					time_diff = new_min_ts - existing_last_ts
+					if time_diff > -overlap_threshold:
+						can_append = True
+						if time_diff < pd.Timedelta(0):
+							logger.debug(f"Smart detection (CSV): Can append with overlap (new {new_min_ts} within {overlap_minutes}min of existing {existing_last_ts})")
+						else:
+							logger.debug(f"Smart detection (CSV): Can append (new {new_min_ts} > existing {existing_last_ts})")
+					else:
+						logger.debug(f"Smart detection (CSV): Need full merge (new {new_min_ts} too far before existing {existing_last_ts})")
+			except Exception as e:
+				logger.warning(f"Failed to check existing data for {symbol}, will do full rewrite: {e}")
+		elif append_only:
+			can_append = True
+
+		if can_append and os.path.exists(filepath):
+			try:
+				# Fast path: append new data without reading existing file
+				csv_content = df.to_csv(index=False, header=False)
+				with open(filepath, 'a', newline='') as f:
+					f.write(csv_content)
+				logger.debug(f"Appended {len(df)} new rows to {filepath} (smart append mode)")
+				
+				# Validate data quality after saving
+				validation_result = validate_downloaded_data(df, symbol, interval)
+				if not validation_result['valid']:
+					logger.error(f"Data validation failed for {symbol} {interval}: {validation_result['issues']}")
+				elif validation_result.get('warnings'):
+					logger.warning(f"{symbol} ({interval}): Data valid but has {len(validation_result['warnings'])} warnings")
+					for warning in validation_result['warnings']:
+						logger.warning(f"  - {warning}")
+				
+				# Clear buffer after saving only if we used the module buffer
+				if use_buffer:
+					klines[symbol] = []
+				return True
 			except Exception as e:
 				logger.warning(f"Failed to append data for {symbol}, falling back to full rewrite: {e}")
 
-		# Fallback to full rewrite
+		# Slow path: full rewrite (for first save or when data needs merging)
 		df.to_csv(filepath, index=False)
-		logger.debug(f"Saved {len(df)} rows to {filepath}")
+		logger.debug(f"Saved {len(df)} rows to {filepath} (full write mode)")
 
+		# Validate data quality after saving
+		validation_result = validate_downloaded_data(df, symbol, interval)
+		if not validation_result['valid']:
+			logger.error(f"Data validation failed for {symbol} {interval}: {validation_result['issues']}")
+		elif validation_result.get('warnings'):
+			logger.warning(f"{symbol} ({interval}): Data valid but has {len(validation_result['warnings'])} warnings")
+			for warning in validation_result['warnings']:
+				logger.warning(f"  - {warning}")
+	
 		# Clear buffer after saving only if we used the module buffer
 		if use_buffer:
 			klines[symbol] = []
 		return True
+
+
+def fetch_funding_rates_batch(
+    exchange,
+    symbols: List[str],
+    start_time: str = None,
+    end_time: str = None,
+    postgres_storage: PostgreSQLStorage = None
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch funding rate data for multiple symbols from OKX.
+    
+    Args:
+        exchange: CCXT exchange instance
+        symbols: List of trading symbols
+        start_time: Start time (ISO format or date string)
+        end_time: End time (ISO format or date string)
+        postgres_storage: PostgreSQL storage instance
+    
+    Returns:
+        Dict mapping symbol to DataFrame with funding rate data
+    """
+    logger.info(f"Fetching funding rates for {len(symbols)} symbols")
+    
+    results = {}
+    
+    for symbol in symbols:
+        try:
+            # Normalize symbol for CCXT
+            from scripts.symbol_utils import get_ccxt_symbol
+            ccxt_symbol = get_ccxt_symbol(normalize_symbol(symbol))
+            
+            # Determine time range
+            if start_time:
+                since = int(pd.Timestamp(start_time, tz='UTC').timestamp() * 1000)
+            elif postgres_storage:
+                # Get last timestamp from database
+                last_ts = postgres_storage.get_latest_funding_rate_timestamp(symbol)
+                if last_ts:
+                    since = int(last_ts.timestamp() * 1000)
+                    logger.info(f"{symbol}: Incremental funding rate fetch from {last_ts}")
+                else:
+                    # Default to last 30 days
+                    since = int((pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=30)).timestamp() * 1000)
+                    logger.info(f"{symbol}: No existing funding rate data, fetching last 30 days")
+            else:
+                # Default to last 30 days
+                since = int((pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=30)).timestamp() * 1000)
+            
+            # Fetch funding rate history
+            # OKX API: GET /api/v5/public/funding-rate-history
+            funding_rates = []
+            
+            try:
+                # Use CCXT's fetch_funding_rate_history if available
+                if hasattr(exchange, 'fetch_funding_rate_history'):
+                    logger.debug(f"{symbol}: Fetching funding rate history via CCXT")
+                    history = exchange.fetch_funding_rate_history(
+                        ccxt_symbol,
+                        since=since,
+                        limit=FETCH_LIMIT
+                    )
+                    
+                    for entry in history:
+                        funding_rates.append({
+                            'timestamp': pd.to_datetime(entry['timestamp'], unit='ms', utc=True),
+                            'funding_rate': entry.get('fundingRate', 0),
+                            'next_funding_time': pd.to_datetime(entry.get('fundingTimestamp', entry['timestamp']), unit='ms', utc=True) if entry.get('fundingTimestamp') else None,
+                            'mark_price': entry.get('markPrice'),
+                            'index_price': entry.get('indexPrice')
+                        })
+                else:
+                    logger.warning(f"{symbol}: fetch_funding_rate_history not available, skipping")
+                    continue
+                
+            except Exception as e:
+                logger.warning(f"{symbol}: Failed to fetch funding rates: {e}")
+                continue
+            
+            if funding_rates:
+                df = pd.DataFrame(funding_rates)
+                df = df.sort_values('timestamp').reset_index(drop=True)
+                
+                logger.info(f"{symbol}: Fetched {len(df)} funding rate records")
+                results[symbol] = df
+                
+                # Save to database if storage is available
+                if postgres_storage:
+                    try:
+                        postgres_storage.save_funding_rates(df, symbol)
+                        logger.info(f"{symbol}: Saved funding rates to database")
+                    except Exception as e:
+                        logger.error(f"{symbol}: Failed to save funding rates: {e}")
+            else:
+                logger.info(f"{symbol}: No funding rate data available")
+        
+        except Exception as e:
+            logger.error(f"{symbol}: Error fetching funding rates: {e}")
+            continue
+    
+    logger.info(f"Funding rate collection complete: {len(results)}/{len(symbols)} symbols")
+    return results
+
+
+def collect_funding_rates_for_symbols(
+    symbols: List[str],
+    start_time: str = None,
+    end_time: str = None,
+    postgres_storage: PostgreSQLStorage = None
+) -> bool:
+    """
+    Collect funding rates for given symbols (wrapper for batch collection).
+    
+    Args:
+        symbols: List of trading symbols
+        start_time: Start time for collection
+        end_time: End time for collection
+        postgres_storage: PostgreSQL storage instance
+    
+    Returns:
+        True if collection succeeded
+    """
+    try:
+        # Create exchange instance
+        exchange = ccxt.okx()
+        
+        # Fetch funding rates
+        results = fetch_funding_rates_batch(
+            exchange,
+            symbols,
+            start_time=start_time,
+            end_time=end_time,
+            postgres_storage=postgres_storage
+        )
+        
+        return len(results) > 0
+    
+    except Exception as e:
+        logger.error(f"Failed to collect funding rates: {e}")
+        return False
+
 
 # Get symbols path from config
 SYMBOLS_PATH = config.get("data", {}).get("symbols", "config/top50_symbols.json")
@@ -1025,7 +1353,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 # Get current time in UTC and format as UTC
                 current_utc = pd.Timestamp.now(tz='UTC')
                 self.end_time = config.get("data_collection", {}).get("end_time", current_utc.strftime("%Y-%m-%dT%H:%M:%SZ"))
-                self.limit = config.get("data_collection", {}).get("limit", 100)
+                self.limit = config.get("data_collection", {}).get("limit", FETCH_LIMIT)
         args = DefaultArgs()
 
     # Use provided timeframe or default to global config
@@ -1108,36 +1436,99 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 else:
                     logger.info(f"No existing CSV data for {symbol}")
 
-            # 如果数据完整性检查失败，清空现有数据
+            # 如果数据完整性检查失败，尝试修复而不是删除
             if not data_integrity_ok:
-                logger.warning(f"Data integrity check failed for {symbol}, clearing existing data before fresh download")
+                logger.warning(f"Data integrity check failed for {symbol}, attempting to repair...")
+                
+                repair_successful = False
                 try:
                     if output_format == "postgres" and postgres_storage is not None:
-                        # 从数据库中删除现有数据
-                        delete_query = text("""
-                        DELETE FROM ohlcv_data
-                        WHERE symbol = :symbol AND interval = :interval
-                        """)
+                        # For PostgreSQL, remove duplicates
+                        logger.info(f"Removing duplicate timestamps from PostgreSQL for {symbol}...")
                         with postgres_storage.engine.connect() as conn:
-                            delete_result = conn.execute(delete_query, {"symbol": symbol, "interval": timeframe})
+                            # Use a simpler approach: delete all and re-insert unique rows
+                            result = conn.execute(text("""
+                                WITH unique_data AS (
+                                    SELECT DISTINCT ON (timestamp) *
+                                    FROM ohlcv_data
+                                    WHERE symbol = :symbol AND interval = :interval
+                                    ORDER BY timestamp, ctid
+                                )
+                                DELETE FROM ohlcv_data
+                                WHERE symbol = :symbol AND interval = :interval
+                                  AND ctid NOT IN (SELECT ctid FROM unique_data)
+                            """), {"symbol": symbol, "interval": timeframe})
                             conn.commit()
-                        logger.info(f"Cleared {delete_result.rowcount} existing records for {symbol} from database")
+                        logger.info(f"Successfully repaired PostgreSQL data for {symbol}")
+                        repair_successful = True
                     else:
-                        # 删除CSV文件
-                        import os
+                        # For CSV, read, deduplicate, and save
+                        logger.info(f"Repairing CSV file for {symbol}...")
                         symbol_safe = symbol.replace("/", "_")
-                        dirpath = os.path.join(output_dir, symbol_safe)
-                        filepath = os.path.join(dirpath, f"{symbol_safe}_{timeframe}.csv")
+                        filepath = os.path.join(output_dir, symbol_safe, f"{symbol_safe}_{timeframe}.csv")
+                        
                         if os.path.exists(filepath):
-                            os.remove(filepath)
-                            logger.info(f"Removed existing CSV file for {symbol}: {filepath}")
-                        # 也删除目录如果为空
-                        if os.path.exists(dirpath) and not os.listdir(dirpath):
-                            os.rmdir(dirpath)
-                            logger.info(f"Removed empty directory for {symbol}: {dirpath}")
-                except Exception as e:
-                    logger.error(f"Failed to clear existing data for {symbol}: {e}")
-                    # 继续处理，但记录错误
+                            df = pd.read_csv(filepath)
+                            original_count = len(df)
+                            
+                            # Deduplicate using normalize_klines
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                            df = normalize_klines(df)
+                            
+                            duplicates_removed = original_count - len(df)
+                            logger.info(f"Removed {duplicates_removed} duplicate timestamps from {symbol}")
+                            
+                            # Save repaired file
+                            df.to_csv(filepath, index=False)
+                            logger.info(f"Successfully repaired CSV file for {symbol}")
+                            repair_successful = True
+                except Exception as repair_error:
+                    logger.error(f"Failed to repair data for {symbol}: {repair_error}")
+                
+                # Only delete if repair failed
+                if not repair_successful:
+                    logger.warning(f"Repair failed, clearing existing data for {symbol} and downloading fresh")
+                    try:
+                        if output_format == "postgres" and postgres_storage is not None:
+                            with postgres_storage.engine.connect() as conn:
+                                delete_query = text("DELETE FROM ohlcv_data WHERE symbol = :symbol AND interval = :interval")
+                                delete_result = conn.execute(delete_query, {"symbol": symbol, "interval": timeframe})
+                                conn.commit()
+                            logger.info(f"Cleared {delete_result.rowcount} existing records for {symbol} from database")
+                        else:
+                            symbol_safe = symbol.replace("/", "_")
+                            dirpath = os.path.join(output_dir, symbol_safe)
+                            filepath = os.path.join(dirpath, f"{symbol_safe}_{timeframe}.csv")
+                            if os.path.exists(filepath):
+                                os.remove(filepath)
+                                logger.info(f"Removed existing CSV file for {symbol}: {filepath}")
+                    except Exception as e:
+                        logger.error(f"Failed to clear existing data for {symbol}: {e}")
+
+            # Helper function to save collected candles (used for both periodic and error-triggered saves)
+            def save_collected_candles(candles_list, save_type="periodic"):
+                """Save collected candles to storage with smart append/merge detection."""
+                if not candles_list:
+                    return False
+                    
+                try:
+                    logger.info(f"{save_type.capitalize()} save: Processing {len(candles_list)} candles for {symbol}")
+                    temp_df = pd.DataFrame(candles_list)
+                    temp_df = temp_df.sort_values('timestamp').reset_index(drop=True)
+                    temp_df['timestamp'] = pd.to_datetime(temp_df['timestamp'], unit='s', utc=True)
+                    
+                    # save_klines will automatically detect if it can append or needs to merge
+                    # based on timestamp comparison
+                    save_klines(symbol, output_dir, temp_df.to_dict('records'), 
+                               append_only=False,  # Let smart detection decide
+                               output_format=output_format, 
+                               postgres_storage=postgres_storage)
+                    
+                    logger.info(f"{save_type.capitalize()} save completed: {len(temp_df)} candles saved")
+                    return True
+                except Exception as save_error:
+                    logger.error(f"{save_type.capitalize()} save failed: {save_error}")
+                    return False
 
             # 智能时间范围验证：在开始数据收集前检查交易对的历史可用性
             logger.info(f"Validating time range availability for {symbol}...")
@@ -1206,6 +1597,13 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             logger.info(f"Fetching data for {symbol} from {symbol_start_time} to {symbol_end_time}")
 
             while request_count < max_requests:
+                # Check for shutdown signal
+                if _shutdown_requested:
+                    logger.info(f"Shutdown requested, saving collected data for {symbol}...")
+                    if all_candles:
+                        save_collected_candles(all_candles, save_type="error")
+                    return
+                
                 request_count += 1
 
                 # Convert directly from milliseconds to a pandas Timestamp object (UTC)
@@ -1339,15 +1737,50 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Progress logging every 10 requests
                     if request_count % 10 == 0:
                         logger.info(f"Progress for {symbol}: {request_count} requests, {len(all_candles)} candles collected")
+                    
+                    # Periodic save every 10,000 candles to prevent data loss on interruption
+                    PERIODIC_SAVE_THRESHOLD = 10000
+                    if len(all_candles) >= PERIODIC_SAVE_THRESHOLD and len(all_candles) % PERIODIC_SAVE_THRESHOLD < 300:
+                        logger.info(f"Periodic save triggered for {symbol}: {len(all_candles)} candles collected")
+                        
+                        # Save only the candles that haven't been saved yet
+                        # Calculate how many candles to save (round down to nearest threshold)
+                        candles_to_save_count = (len(all_candles) // PERIODIC_SAVE_THRESHOLD) * PERIODIC_SAVE_THRESHOLD
+                        candles_to_save = all_candles[:candles_to_save_count]
+                        
+                        if save_collected_candles(candles_to_save, save_type="periodic"):
+                            # Remove saved candles from the list, keep only unsaved ones
+                            all_candles = all_candles[candles_to_save_count:]
+                            logger.info(f"Cleared {candles_to_save_count} saved candles from memory, {len(all_candles)} remaining")
 
+
+                except KeyboardInterrupt:
+                    logger.info(f"Received KeyboardInterrupt, saving collected data for {symbol}...")
+                    # Save collected data before exiting
+                    if all_candles:
+                        logger.warning(f"Saving {len(all_candles)} collected candles before shutdown")
+                        save_collected_candles(all_candles, save_type="error")
+                    raise  # Re-raise to propagate the interrupt
                 except ccxt.NetworkError as e:
                     logger.error(f"Network error for {symbol}: {e}")
+                    # Save collected data before exiting due to error
+                    if all_candles:
+                        logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to network error")
+                        save_collected_candles(all_candles, save_type="error")
                     break
                 except ccxt.ExchangeError as e:
                     logger.error(f"Exchange error for {symbol}: {e}")
+                    # Save collected data before exiting due to error
+                    if all_candles:
+                        logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to exchange error")
+                        save_collected_candles(all_candles, save_type="error")
                     break
                 except Exception as e:
                     logger.error(f"Unexpected error for {symbol}: {e}")
+                    # Save collected data before exiting due to error
+                    if all_candles:
+                        logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to unexpected error")
+                        save_collected_candles(all_candles, save_type="error")
                     break
 
             # Check if we hit the maximum request limit
@@ -1909,9 +2342,10 @@ parser.add_argument(
 parser.add_argument(
     "--timeframes",
     type=str,
-    default="15m,1h,4h,1d",
-    help="Comma-separated list of timeframes to collect (e.g., '15m,1h,4h,1d')"
+    default=None,  # Use TIMEFRAME from config if not specified
+    help="Comma-separated list of timeframes to collect (e.g., '15m,1h,4h,1d'). If not specified, uses interval from config."
 )
+
 
 if __name__ == '__main__':
     print("Reminder: Ensure 'conda activate qlib' before running")
