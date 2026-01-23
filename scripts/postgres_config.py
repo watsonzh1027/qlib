@@ -421,7 +421,20 @@ def setup_database_schema(config: PostgresConfig, drop_existing: bool = False) -
 
             # Create initial partitions for supported intervals
             for interval in config.supported_intervals:
-                partition_name = f"ohlcv_data_{interval.replace('m', 'm').replace('h', 'h').replace('d', 'd')}"
+                # Use a safe partition name that handles minutes vs months to avoid case-folding collisions
+                safe_interval = interval
+                if interval == '1M':
+                    safe_interval = '1month'
+                elif interval.endswith('m'):
+                    safe_interval = interval.replace('m', 'min')
+                elif interval.endswith('h'):
+                    safe_interval = interval.replace('h', 'hour')
+                elif interval.endswith('d'):
+                    safe_interval = interval.replace('d', 'day')
+                elif interval.endswith('w'):
+                    safe_interval = interval.replace('w', 'week')
+                
+                partition_name = f"ohlcv_data_{safe_interval.lower()}"
 
                 # Drop existing partition if recreating
                 if drop_existing:
@@ -433,7 +446,7 @@ def setup_database_schema(config: PostgresConfig, drop_existing: bool = False) -
                 PARTITION OF ohlcv_data FOR VALUES IN ('{interval}');
                 """
                 conn.execute(text(create_partition_sql))
-                logger.info(f"Created partition: {partition_name}")
+                logger.info(f"Created partition: {partition_name} for interval {interval}")
 
             # Create indexes
             indexes = [

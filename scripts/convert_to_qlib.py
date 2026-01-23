@@ -24,6 +24,10 @@ from scripts.config_manager import ConfigManager
 from scripts.dump_bin import DumpDataAll  # Import DumpDataAll for binary conversion
 from scripts.symbol_utils import normalize_symbol  # Import symbol normalization
 
+from qlib.utils.logging_config import setup_logging, startlog, endlog
+
+# Setup logging
+logger = startlog(name="data_service")
 
 def calculate_proportion_segments(start_date, end_date, proportions):
     """

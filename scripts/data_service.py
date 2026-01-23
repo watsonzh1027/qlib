@@ -45,18 +45,10 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from qlib.utils.logging_config import setup_logging, startlog, endlog
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/data_service.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
+logger = startlog(name="data_service")
 
 class DataServiceConfig:
     """Configuration manager for data service"""
@@ -260,8 +252,9 @@ class DataService:
             cmd = [
                 'python', 'scripts/okx_data_collector.py',
                 '--output', 'db',
-                '--start-time', start_time.strftime('%Y-%m-%d'),
-                '--end-time', end_time.strftime('%Y-%m-%d')
+                '--start_time', start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                '--end_time', end_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                '--run-once'
             ]
             
             logger.info(f"Running command: {' '.join(cmd)}")
@@ -307,9 +300,9 @@ class DataService:
         
         try:
             # Import collection function
-            from scripts.okx_data_collector import collect_funding_rates_for_symbols, load_symbols
-            from scripts.postgres_storage import PostgreSQLStorage
-            from scripts.postgres_config import PostgresConfig
+            from okx_data_collector import collect_funding_rates_for_symbols, load_symbols
+            from postgres_storage import PostgreSQLStorage
+            from postgres_config import PostgresConfig
             
             # Load symbols
             symbols = load_symbols(self.config.symbols_file)
@@ -339,8 +332,8 @@ class DataService:
             # Collect funding rates
             success = collect_funding_rates_for_symbols(
                 symbols=symbols,
-                start_time=start_time.strftime('%Y-%m-%d'),
-                end_time=end_time.strftime('%Y-%m-%d'),
+                start_time=start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                end_time=end_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 postgres_storage=postgres_storage
             )
             

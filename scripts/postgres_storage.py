@@ -426,19 +426,21 @@ class PostgreSQLStorage:
                     batch = records[i:i + batch_size]
                     try:
                         session.execute(insert_sql, batch)
+                        session.commit()
                         inserted_count += len(batch)
-                    except IntegrityError as e:
-                        # Some duplicates in this batch, try individual inserts
-                        logger.warning(f"Batch insert failed, trying individual inserts: {e}")
+                    except SQLAlchemyError as e:
+                        # Rollback the failed batch before trying individual inserts
+                        session.rollback()
+                        logger.warning(f"Batch insert failed ({e}), trying individual inserts...")
                         for record in batch:
                             try:
                                 session.execute(insert_sql, [record])
+                                session.commit()
                                 inserted_count += 1
-                            except IntegrityError:
-                                # Duplicate, skip
+                            except SQLAlchemyError:
+                                # Duplicate or other error for this single record, skip
+                                session.rollback()
                                 pass
-
-                session.commit()
 
                 logger.info(f"Successfully saved {inserted_count} OHLCV records for {symbol} {interval}")
                 return True
@@ -823,17 +825,19 @@ class PostgreSQLStorage:
                     batch = records[i:i + batch_size]
                     try:
                         session.execute(insert_sql, batch)
+                        session.commit()
                         inserted_count += len(batch)
-                    except IntegrityError as e:
-                        logger.warning(f"Batch insert failed, trying individual inserts: {e}")
+                    except SQLAlchemyError as e:
+                        session.rollback()
+                        logger.warning(f"Batch insert failed ({e}), trying individual inserts...")
                         for record in batch:
                             try:
                                 session.execute(insert_sql, [record])
+                                session.commit()
                                 inserted_count += 1
-                            except IntegrityError:
+                            except SQLAlchemyError:
+                                session.rollback()
                                 pass
-
-                session.commit()
 
                 logger.info(f"Successfully saved {inserted_count} funding rate records for {symbol}")
                 return True

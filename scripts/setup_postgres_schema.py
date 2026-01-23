@@ -184,14 +184,28 @@ def create_monthly_partitions(config: PostgresConfig) -> None:
 
                 # Create partition for each interval
                 for interval in config.supported_intervals:
-                    partition_name = f"ohlcv_data_{interval}_{year}_{month:02d}"
+                    # Use a safe partition name that handles minutes vs months to avoid case-folding collisions
+                    safe_interval = interval
+                    if interval == '1M':
+                        safe_interval = '1month'
+                    elif interval.endswith('m'):
+                        safe_interval = interval.replace('m', 'min')
+                    elif interval.endswith('h'):
+                        safe_interval = interval.replace('h', 'hour')
+                    elif interval.endswith('d'):
+                        safe_interval = interval.replace('d', 'day')
+                    elif interval.endswith('w'):
+                        safe_interval = interval.replace('w', 'week')
+                    
+                    base_partition_name = f"ohlcv_data_{safe_interval.lower()}"
+                    partition_name = f"{base_partition_name}_{year}_{month:02d}"
 
                     start_date = partition_date
                     end_date = start_date + timedelta(days=30)
 
                     create_partition_sql = f"""
                     CREATE TABLE IF NOT EXISTS {partition_name}
-                    PARTITION OF ohlcv_data_{interval}
+                    PARTITION OF {base_partition_name}
                     FOR VALUES FROM ('{start_date.isoformat()}') TO ('{end_date.isoformat()}');
                     """
 
