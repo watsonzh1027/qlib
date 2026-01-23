@@ -16,7 +16,7 @@
     },
     "data_service": {
         "enabled": false,
-        "update_interval_minutes": 15,
+        "update_interval_minutes": 5,
         "symbols": "config/instruments.json",
         "base_interval": "1m",
         "target_timeframes": [
@@ -40,7 +40,7 @@
         "limit": 1000,
         "overlap_minutes": 5,
         "enable_incremental": true,
-        "output": "csv"
+        "output": "db"
     },
     "database": {
         "host": "localhost",

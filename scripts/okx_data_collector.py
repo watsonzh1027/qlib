@@ -441,7 +441,21 @@ def get_last_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", inte
 
             # parts[0] is timestamp, parts[1] is symbol
             timestamp_str = parts[0].strip()
-            return pd.to_datetime(timestamp_str)
+            if not timestamp_str:
+                return None
+            
+            # Robust parsing: handle both datetime strings and numeric unix timestamps
+            try:
+                if timestamp_str.replace('.', '', 1).isdigit():
+                    ts_val = float(timestamp_str)
+                    # If value is very large, it's likely milliseconds; otherwise seconds
+                    unit = 'ms' if ts_val > 1e11 else 's'
+                    ts = pd.to_datetime(ts_val, unit=unit, utc=True)
+                else:
+                    ts = pd.to_datetime(timestamp_str, utc=True)
+                return ts if pd.notnull(ts) else None
+            except Exception:
+                return None
 
     except Exception as e:
         logger.warning(f"Failed to read last timestamp from {filepath}: {e}")
@@ -487,8 +501,22 @@ def get_first_timestamp_from_csv(symbol: str, base_dir: str = "data/klines", int
 
             # parts[0] is timestamp, parts[1] is symbol
             timestamp_str = parts[0].strip()
+            if not timestamp_str:
+                return None
             logger.debug(f"[get_first_timestamp_from_csv]Symbol {symbol}: first timestamp_str: {timestamp_str}")
-            return pd.to_datetime(timestamp_str)
+            
+            # Robust parsing: handle both datetime strings and numeric unix timestamps
+            try:
+                if timestamp_str.replace('.', '', 1).isdigit():
+                    ts_val = float(timestamp_str)
+                    # If value is very large, it's likely milliseconds; otherwise seconds
+                    unit = 'ms' if ts_val > 1e11 else 's'
+                    ts = pd.to_datetime(ts_val, unit=unit, utc=True)
+                else:
+                    ts = pd.to_datetime(timestamp_str, utc=True)
+                return ts if pd.notnull(ts) else None
+            except Exception:
+                return None
 
     except Exception as e:
         logger.warning(f"Failed to read first timestamp from {filepath}: {e}")
@@ -653,12 +681,12 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
         last_timestamp = get_last_timestamp_from_db(symbol, interval, postgres_storage)
         first_timestamp = get_first_timestamp_from_db(symbol, interval, postgres_storage)
         if last_timestamp:
-            logger.debug(f"Symbol {symbol}: Using database timestamps - first={first_timestamp}, last={last_timestamp}")
+            logger.debug(f"Symbol {symbol}: Using database timestamps - first={first_timestamp.isoformat()}, last={last_timestamp.isoformat()}")
     else:
         last_timestamp = get_last_timestamp_from_csv(symbol, base_dir, interval)
         first_timestamp = get_first_timestamp_from_csv(symbol, base_dir, interval)
         if last_timestamp:
-            logger.debug(f"Symbol {symbol}: Using CSV timestamps - first={first_timestamp}, last={last_timestamp}")
+            logger.debug(f"Symbol {symbol}: Using CSV timestamps - first={first_timestamp.isoformat()}, last={last_timestamp.isoformat()}")
 
     if last_timestamp is None or first_timestamp is None:
         # No existing data, fetch full (capped) range
@@ -702,7 +730,7 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     # assume the exchange doesn't have data that early and don't try to fetch it
     max_gap_days = 30
     if needs_update_start and (first_timestamp - req_start_ts).days > max_gap_days:
-        logger.info(f"Symbol {symbol}: Gap between requested start {req_start_ts} and first available data {first_timestamp} is too large ({(first_timestamp - req_start_ts).days} days > {max_gap_days} days), assuming exchange doesn't have earlier data")
+        logger.info(f"Symbol {symbol}: Gap between requested start {req_start_ts.isoformat()} and first available data {first_timestamp.isoformat()} is too large ({(first_timestamp - req_start_ts).days} days > {max_gap_days} days), assuming exchange doesn't have earlier data")
         needs_update_start = False
         # Record this floor to avoid future attempts
         _earliest_manager.set_earliest(symbol, interval, first_timestamp)
@@ -712,12 +740,12 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     # Skip fetching if existing data fully covers the requested range and no updates needed
     if first_timestamp <= req_start_ts and last_timestamp >= req_end_ts and not needs_update_start and not needs_update_end:
         logger.info(f"Symbol {symbol}: Existing data fully covers requested range and is up-to-date, skipping fetch")
-        logger.info(f"Symbol {symbol}: Data range {first_timestamp} to {last_timestamp}, requested {req_start_ts} to {req_end_ts}")
+        logger.info(f"Symbol {symbol}: Data range {first_timestamp.isoformat()} to {last_timestamp.isoformat()}, requested {req_start_ts.isoformat()} to {req_end_ts.isoformat()}")
         return requested_start, requested_end, False
 
     # Skip fetching if requested end time is before or at the last available data and no earlier data is needed
     if req_end_ts <= last_timestamp and not needs_update_start and not needs_update_end:
-        logger.info(f"Symbol {symbol}: Requested end time {req_end_ts} is before or at last available data {last_timestamp}, and no earlier data needed, skipping fetch")
+        logger.info(f"Symbol {symbol}: Requested end time {req_end_ts.isoformat()} is before or at last available data {last_timestamp.isoformat()}, and no earlier data needed, skipping fetch")
         return requested_start, requested_end, False
 
     # Determine if we need to fetch earlier data
@@ -782,6 +810,12 @@ def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 1) -> boo
         True if data is continuous, False otherwise
     """
     if df.empty or 'timestamp' not in df.columns:
+        return False
+
+    # Check for NaN/NaT timestamps - these are corrupted data
+    nan_timestamps = df['timestamp'].isna().sum()
+    if nan_timestamps > 0:
+        logger.warning(f"Found {nan_timestamps} malformed (NaN/NaT) timestamps in data")
         return False
 
     try:
@@ -915,6 +949,11 @@ def normalize_klines(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.set_index('timestamp', inplace=True)
     df.index = pd.to_datetime(df.index)
+    # Drop rows with NaT timestamps
+    original_len = len(df)
+    df = df[df.index.notnull()]
+    if len(df) < original_len:
+        logger.warning(f"Dropped {original_len - len(df)} rows with NaT timestamps")
     df = df[~df.index.duplicated(keep="first")]  # Remove duplicates, keep first
     df.sort_index(inplace=True)
     df.index.names = ['timestamp']
@@ -946,6 +985,16 @@ def validate_downloaded_data(df: pd.DataFrame, symbol: str, interval: str,
     if df.empty:
         issues.append("DataFrame is empty")
         return {'valid': False, 'issues': issues, 'warnings': warnings}
+
+    # 0. Check for malformed timestamps
+    if 'timestamp' in df.columns:
+        nan_timestamps = df['timestamp'].isna().sum()
+        if nan_timestamps > 0:
+            issues.append(f"Found {nan_timestamps} malformed (NaN/NaT) timestamps")
+            valid = False
+    else:
+        issues.append("Missing 'timestamp' column")
+        valid = False
     
     # 1. Check required columns
     required_cols = ['open', 'high', 'low', 'close', 'volume']
@@ -1471,6 +1520,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             logger.info("Shutdown requested, stopping symbol loop.")
             break
         try:
+            if _shutdown_requested: break
             # 数据完整性验证：在下载前检查现有数据
             logger.info(f"Validating existing data integrity for {symbol}...")
             data_integrity_ok = True
@@ -1519,11 +1569,11 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                   AND ctid NOT IN (SELECT ctid FROM unique_data)
                             """), {"symbol": symbol, "interval": timeframe})
                             conn.commit()
-                        logger.info(f"Successfully repaired PostgreSQL data for {symbol}")
+                        logger.info(f"Successfully repaired PostgreSQL data for {symbol} (removed duplicates/malformed rows)")
                         repair_successful = True
                     else:
                         # For CSV, read, deduplicate, and save
-                        logger.info(f"Repairing CSV file for {symbol}...")
+                        logger.info(f"Repairing CSV file for {symbol} (deduplicating and cleaning malformed rows)...")
                         symbol_safe = symbol.replace("/", "_")
                         filepath = os.path.join(output_dir, symbol_safe, f"{symbol_safe}_{timeframe}.csv")
                         
@@ -1737,14 +1787,17 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # The pandas Timestamp object is already readable, but you can also format it
                     readable_string = pd_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
 
-                    logger.debug(f"Received {len(ohlcv)} candles for {symbol}, timestamp range: {ohlcv[0][0]} to {ohlcv[-1][0]}, {readable_string} to {symbol_end_time}")
+                    readable_first = pd.to_datetime(ohlcv[0][0], unit='ms', utc=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+                    readable_last = pd.to_datetime(ohlcv[-1][0], unit='ms', utc=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+                    logger.debug(f"Received {len(ohlcv)} candles for {symbol}, timestamp range: {ohlcv[0][0]} ({readable_first}) to {ohlcv[-1][0]} ({readable_last}), target end: {symbol_end_time}")
 
                     # Check if we're getting the same data repeatedly (API limitation)
                     if request_count > 1 and ohlcv:
                         # Compare with the last response to detect duplicates
                         last_candle_ts = ohlcv[0][0]  # First candle timestamp in current response
                         if 'last_response_first_ts' in locals() and last_response_first_ts == last_candle_ts:
-                            logger.info(f"API returning duplicate data for {symbol} (same first timestamp {last_candle_ts}), stopping collection at {request_count} requests, collected {len(all_candles)} candles")
+                            readable_dup = pd.to_datetime(last_candle_ts, unit='ms', utc=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+                            logger.info(f"API returning duplicate data for {symbol} (same first timestamp {last_candle_ts}/{readable_dup}), stopping collection at {request_count} requests, collected {len(all_candles)} candles")
                             break
                         last_response_first_ts = last_candle_ts
 
@@ -1759,7 +1812,8 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         # Check if candle is within our time range
                         if ts_ms > symbol_end_ts:
                             # We've gone past the end time, stop fetching
-                            logger.debug(f"Reached end time boundary for {symbol} at timestamp {ts_ms}")
+                            readable_ts = pd.to_datetime(ts_ms, unit='ms', utc=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+                            logger.debug(f"Reached end time boundary for {symbol} at timestamp {ts_ms} ({readable_ts})")
                             break
 
                         if ts_ms >= symbol_start_ts:  # Within range
@@ -1903,7 +1957,10 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 save_collected_candles(all_candles, save_type="final")
                 
                 # Store the new data in result (caller only uses keys, but good for completeness)
-                result[symbol] = pd.DataFrame(all_candles)
+                df = pd.DataFrame(all_candles)
+                if not df.empty and 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
+                result[symbol] = df
             else:
                 logger.info(f"No new candles collected for {symbol} in the specified range")
 
@@ -2068,8 +2125,10 @@ async def main(args):
         stop_event = asyncio.Event()
 
         def _signal_handler():
+            global _shutdown_requested
             if not stop_event.is_set():
                 logger.info("Received stop signal, shutting down polling...")
+                _shutdown_requested = True
                 stop_event.set()
 
         # Register signal handlers (best-effort; may not work on Windows)
