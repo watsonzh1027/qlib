@@ -70,10 +70,10 @@ def _handle_interrupt(signum, frame):
     import sys
     if not _shutdown_requested:
         _shutdown_requested = True
-        print("\n\n⚠️  Interrupt signal received! Finishing current operation and saving data...")
-        print("⚠️  Press Ctrl+C again to force quit (may lose data)\n")
+        logger.debug("\n\n⚠️  Interrupt signal received! Finishing current operation and saving data...")
+        logger.debug("⚠️  Press Ctrl+C again to force quit (may lose data)\n")
     else:
-        print("\n\n❌ Force quit! Data may be lost.\n")
+        logger.debug("\n\n❌ Force quit! Data may be lost.\n")
         sys.exit(1)
 
 # Register signal handler
@@ -111,6 +111,34 @@ configure_ccxt_logging(verbose=False)
 
 
 # normalize_symbol_for_ccxt is imported from scripts.symbol_utils
+
+
+def resolve_market_symbol(symbol: str, exchange=None, market_type: str | None = None) -> str:
+    """
+    Resolve the CCXT market symbol based on configured market type and available markets.
+    This helps ensure swap/future symbols are mapped to OKX linear contracts when needed.
+    """
+    from scripts.symbol_utils import get_ccxt_symbol
+
+    resolved_market_type = (market_type or config.get("data", {}).get("market_type", "")).lower()
+    ccxt_symbol = get_ccxt_symbol(normalize_symbol(symbol))
+
+    if resolved_market_type in {"future", "swap", "perp", "perpetual"}:
+        if "/USDT" in ccxt_symbol and ":" not in ccxt_symbol:
+            ccxt_symbol = f"{ccxt_symbol}:USDT"
+
+    exchange_markets = getattr(exchange, "markets", None) if exchange is not None else None
+    if isinstance(exchange_markets, dict):
+        if ccxt_symbol in exchange_markets:
+            return ccxt_symbol
+
+        ccxt_norm = ccxt_symbol.replace("-", "/").replace("_", "/").upper()
+        for mk in exchange_markets:
+            mk_norm = mk.replace("-", "/").replace("_", "/").upper()
+            if mk_norm == ccxt_norm or mk_norm.startswith(ccxt_norm + ":") or mk_norm.startswith(ccxt_norm + " "):
+                return mk
+
+    return ccxt_symbol
 
 
 def validate_trading_pair_availability(symbol: str, requested_start: str, requested_end: str, exchange=None) -> dict:
@@ -162,30 +190,13 @@ def validate_trading_pair_availability(symbol: str, requested_start: str, reques
         if not hasattr(exchange, 'markets') or exchange.markets is None:
             exchange.load_markets()
 
-        # Normalize symbol for CCXT/OKX using get_ccxt_symbol
-        from scripts.symbol_utils import get_ccxt_symbol
-        market_symbol = get_ccxt_symbol(normalize_symbol(symbol))
+        market_symbol = resolve_market_symbol(symbol, exchange)
 
-        # Only perform strict dict-based validation and loose key matching if the exchange provides a dict of markets
+        # Only perform strict dict-based validation if the exchange provides a dict of markets
         exchange_markets = getattr(exchange, 'markets', None)
-        if isinstance(exchange_markets, dict):
-            # Check if symbol exists in exchange directly
-            if market_symbol not in exchange_markets:
-                # Try loose matching (OKX derivatives sometimes append suffixes like ':USDT')
-                matched_market = None
-                for mk in exchange_markets:
-                    mk_norm = mk.replace('-', '/').replace('_', '/').upper()
-                    if mk_norm == market_symbol or mk_norm.startswith(market_symbol + ":") or mk_norm.startswith(market_symbol + " "):
-                        matched_market = mk
-                        break
-                if matched_market is None:
-                    result['reason'] = f"Symbol {symbol} not found in exchange markets"
-                    return result
-                else:
-                    market_symbol = matched_market
-        else:
-            # In test environments or when markets is not a dict (MagicMock), skip strict validation
-            pass
+        if isinstance(exchange_markets, dict) and market_symbol not in exchange_markets:
+            result['reason'] = f"Symbol {symbol} not found in exchange markets"
+            return result
 
         # Try to find earliest available data by probing different time periods
         timeframe = '1d'  # Use daily data for availability check
@@ -726,9 +737,10 @@ def calculate_fetch_window(symbol: str, requested_start: str, requested_end: str
     needs_update_start = needs_backfill and (first_timestamp - req_start_ts) > interval_timedelta
     needs_update_end = req_end_ts > last_timestamp and (req_end_ts - last_timestamp) > interval_timedelta
 
-    # If the gap between requested start and first available data is too large (>30 days),
-    # assume the exchange doesn't have data that early and don't try to fetch it
-    max_gap_days = 30
+    # If the gap between requested start and first available data is too large,
+    # assume the exchange doesn't have data that early and don't try to fetch it.
+    # Relaxed this to 10 years to allow bridging 2024 to 2026 gaps.
+    max_gap_days = 3650 
     if needs_update_start and (first_timestamp - req_start_ts).days > max_gap_days:
         logger.info(f"Symbol {symbol}: Gap between requested start {req_start_ts.isoformat()} and first available data {first_timestamp.isoformat()} is too large ({(first_timestamp - req_start_ts).days} days > {max_gap_days} days), assuming exchange doesn't have earlier data")
         needs_update_start = False
@@ -1146,7 +1158,7 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 	if postgres_storage is None:
 		postgres_storage = _global_postgres_storage
 	
-	print(f"DEBUG: save_klines called for {symbol}. Entries: {len(entries) if entries else 0}, Format: {output_format}")
+	logger.debug(f"DEBUG: save_klines called for {symbol}. Entries: {len(entries) if entries else 0}, Format: {output_format}")
 
 	global klines
 	if klines is None:
@@ -1211,7 +1223,24 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 
 		# Smart append detection: check if we can safely append
 		can_append = False
-		if os.path.exists(filepath) and not append_only:
+		
+		# Check for schema match first
+		schema_match = True
+		if os.path.exists(filepath):
+			try:
+				with open(filepath, 'r') as f:
+					header = f.readline().strip().split(',')
+				# Check if new dataframe columns match existing header
+				# We only check if new columns are a superset or equal, but for append they must match exactly or we need to handle it.
+				# Simplest: if columns don't match exactly, force rewrite.
+				if set(header) != set(df.columns):
+					logger.info(f"Schema mismatch for {symbol} (Existing: {header}, New: {list(df.columns)}). Forcing full rewrite.")
+					schema_match = False
+			except Exception as e:
+				logger.warning(f"Failed to check schema for {symbol}: {e}")
+				schema_match = False
+
+		if os.path.exists(filepath) and not append_only and schema_match:
 			try:
 				# Get the last timestamp from existing file
 				existing_last_ts = get_last_timestamp_from_csv(symbol, base_dir, interval)
@@ -1236,13 +1265,19 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 						logger.debug(f"Smart detection (CSV): Need full merge (new {new_min_ts} too far before existing {existing_last_ts})")
 			except Exception as e:
 				logger.warning(f"Failed to check existing data for {symbol}, will do full rewrite: {e}")
-		elif append_only:
+		elif append_only and schema_match:
 			can_append = True
 
 		if can_append and os.path.exists(filepath):
 			try:
 				# Fast path: append new data without reading existing file
-				csv_content = df.to_csv(index=False, header=False)
+				# Ensure columns are in the same order as header
+				# Read header again to be sure of order
+				with open(filepath, 'r') as f:
+					header_cols = f.readline().strip().split(',')
+				
+				# Write only the columns present in the header, in that order
+				csv_content = df[header_cols].to_csv(index=False, header=False)
 				with open(filepath, 'a', newline='') as f:
 					f.write(csv_content)
 				logger.debug(f"Appended {len(df)} new rows to {filepath} (smart append mode)")
@@ -1263,7 +1298,24 @@ def save_klines(symbol: str, base_dir: str = "data/klines", entries: list | None
 			except Exception as e:
 				logger.warning(f"Failed to append data for {symbol}, falling back to full rewrite: {e}")
 
-		# Slow path: full rewrite (for first save or when data needs merging)
+		# Slow path: full rewrite (for first save or when data needs merging or schema changed)
+		if os.path.exists(filepath):
+			try:
+				existing_df = pd.read_csv(filepath)
+				existing_cols = list(existing_df.columns)
+				all_cols = existing_cols + [col for col in df.columns if col not in existing_cols]
+				existing_df = existing_df.reindex(columns=all_cols)
+				df = df.reindex(columns=all_cols)
+
+				merged_df = pd.concat([df, existing_df], ignore_index=True, sort=False)
+				if 'timestamp' in merged_df.columns:
+					merged_df['timestamp'] = pd.to_datetime(merged_df['timestamp'], errors='coerce', utc=True)
+				merged_df = normalize_klines(merged_df)
+				df = merged_df
+				logger.info(f"Merged existing CSV data with new data for {symbol} {interval} before full rewrite")
+			except Exception as e:
+				logger.warning(f"Failed to merge existing CSV data for {symbol} {interval}, rewriting with new data only: {e}")
+
 		df.to_csv(filepath, index=False)
 		logger.debug(f"Saved {len(df)} rows to {filepath} (full write mode)")
 
@@ -1292,6 +1344,9 @@ def fetch_funding_rates_batch(
     """
     Fetch funding rate data for multiple symbols from OKX.
     
+    NOTE: Funding rates settle every 8 hours at 00:00, 08:00, 16:00 UTC.
+    Optimal collection timing is 5-10 minutes after settlement.
+    
     Args:
         exchange: CCXT exchange instance
         symbols: List of trading symbols
@@ -1300,21 +1355,66 @@ def fetch_funding_rates_batch(
         postgres_storage: PostgreSQL storage instance
     
     Returns:
-        Dict mapping symbol to DataFrame with funding rate data
+        Dict mapping symbol to DataFrame with funding rate data (8-hour intervals)
     """
-    logger.info(f"Fetching funding rates for {len(symbols)} symbols")
+    logger.info(f"Fetching funding rates for {len(symbols)} symbols (native 8-hour frequency)")
     
     results = {}
     
+    # Funding rates settle on a fixed interval; use a short lookback to capture
+    # the most recent event for merge_asof alignment.
+    ds_cfg = config.get("data_service", {})
+    native_interval = str(ds_cfg.get("funding_rate_native_interval", "8h")).lower()
+    window_end_min = int(ds_cfg.get("funding_collection_window_end", 10))
+
+    native_hours = 8.0
+    try:
+        if native_interval.endswith("h"):
+            native_hours = float(native_interval[:-1])
+        elif native_interval.endswith("m"):
+            native_hours = float(native_interval[:-1]) / 60.0
+        elif native_interval.endswith("d"):
+            native_hours = float(native_interval[:-1]) * 24.0
+    except Exception:
+        native_hours = 8.0
+
+    lookback_hours = max(1.0, native_hours + (window_end_min / 60.0))
+
     for symbol in symbols:
         try:
             # Normalize symbol for CCXT
             from scripts.symbol_utils import get_ccxt_symbol
             ccxt_symbol = get_ccxt_symbol(normalize_symbol(symbol))
             
+            # Explicitly target linear swap for OKX funding rates
+            # ETH/USDT (Spot) -> ETH/USDT:USDT (Linear Swap)
+            if '/' in ccxt_symbol and ':' not in ccxt_symbol:
+                ccxt_symbol = f"{ccxt_symbol}:USDT"
+            
             # Determine time range
+            start_time_dt = None
+            end_ts = None
+            end_time_dt = None
+            if end_time is not None:
+                if isinstance(end_time, str):
+                    end_time_dt = pd.Timestamp(end_time, tz='UTC')
+                else:
+                    end_time_dt = pd.Timestamp(end_time)
+                    if end_time_dt.tzinfo is None:
+                        end_time_dt = end_time_dt.tz_localize('UTC')
+                end_ts = int(end_time_dt.timestamp() * 1000)
+
             if start_time:
-                since = int(pd.Timestamp(start_time, tz='UTC').timestamp() * 1000)
+                # Handle both string and datetime inputs
+                if isinstance(start_time, str):
+                    start_time_dt = pd.Timestamp(start_time, tz='UTC')
+                    since = int(start_time_dt.timestamp() * 1000)
+                else:
+                    # Already a datetime object, don't pass tz parameter
+                    start_time_dt = pd.Timestamp(start_time)
+                    if start_time_dt.tzinfo is None:
+                        start_time_dt = start_time_dt.tz_localize('UTC')
+                    since = int(start_time_dt.timestamp() * 1000)
             elif postgres_storage:
                 # Get last timestamp from database
                 last_ts = postgres_storage.get_latest_funding_rate_timestamp(symbol)
@@ -1328,6 +1428,18 @@ def fetch_funding_rates_batch(
             else:
                 # Default to last 30 days
                 since = int((pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=30)).timestamp() * 1000)
+
+            lookback_ms = int(pd.Timedelta(hours=lookback_hours).total_seconds() * 1000)
+
+            # Always include the previous funding event before the start_time
+            if start_time_dt is not None:
+                since = max(0, since - lookback_ms)
+
+            # If end_time is near start_time, extend lookback to capture prior funding event
+            if end_ts is not None:
+                lookback_ms = int(pd.Timedelta(hours=lookback_hours).total_seconds() * 1000)
+                if end_ts - since < lookback_ms:
+                    since = max(0, end_ts - lookback_ms)
             
             # Fetch funding rate history
             # OKX API: GET /api/v5/public/funding-rate-history
@@ -1362,6 +1474,15 @@ def fetch_funding_rates_batch(
             if funding_rates:
                 df = pd.DataFrame(funding_rates)
                 df = df.sort_values('timestamp').reset_index(drop=True)
+
+                # Filter to a practical window if end_time is provided
+                if end_time_dt is not None:
+                    if start_time_dt is not None:
+                        min_start = start_time_dt - pd.Timedelta(hours=lookback_hours)
+                    else:
+                        min_start = end_time_dt - pd.Timedelta(hours=lookback_hours)
+                    df = df[(df['timestamp'] <= end_time_dt) & (df['timestamp'] >= min_start)]
+                    df = df.sort_values('timestamp').reset_index(drop=True)
                 
                 logger.info(f"{symbol}: Fetched {len(df)} funding rate records")
                 results[symbol] = df
@@ -1435,6 +1556,205 @@ def load_symbols(path: str = SYMBOLS_PATH) -> List[str]:
         logger.error(f"Failed to load symbols: {e}")
         return []
 
+def enhance_candles(candles, symbol, exchange):
+    """
+    Enhance candles with VWAP and Funding Rate.
+    
+    Args:
+        candles: List of candle dictionaries
+        symbol: Trading symbol
+        exchange: CCXT exchange instance
+        
+    Returns:
+        List of enhanced candle dictionaries with vwap and funding_rate fields
+    """
+    if not candles:
+        return candles
+
+    try:
+        df = pd.DataFrame(candles)
+        if df.empty:
+            return candles
+
+        # 1. Calculate VWAP (O+H+L+C)/4
+        df['vwap'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4.0
+        
+        # 2. Fetch Funding Rate
+        start_ts = df['timestamp'].min()
+        end_ts = df['timestamp'].max()
+        
+        # Convert timestamps to datetime (handle both numeric and datetime types)
+        if pd.api.types.is_numeric_dtype(df['timestamp']):
+            # Timestamps are in seconds (numeric)
+            start_time_dt = pd.to_datetime(start_ts, unit='s', utc=True)
+            end_time_dt = pd.to_datetime(end_ts, unit='s', utc=True)
+        else:
+            # Timestamps are already datetime objects
+            start_time_dt = pd.to_datetime(start_ts)
+            end_time_dt = pd.to_datetime(end_ts)
+            # Ensure UTC timezone
+            if start_time_dt.tzinfo is None:
+                start_time_dt = start_time_dt.tz_localize('UTC')
+            if end_time_dt.tzinfo is None:
+                end_time_dt = end_time_dt.tz_localize('UTC')
+        
+        fr_results = fetch_funding_rates_batch(
+            exchange, 
+            [symbol], 
+            start_time=start_time_dt, 
+            end_time=end_time_dt
+        )
+        fr_df = fr_results.get(symbol)
+        
+        if fr_df is not None and not fr_df.empty:
+            # Prepare merge - create timestamp_dt column for merge
+            if pd.api.types.is_numeric_dtype(df['timestamp']):
+                df['timestamp_dt'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
+            else:
+                # Already datetime, just copy
+                df['timestamp_dt'] = pd.to_datetime(df['timestamp'])
+                if df['timestamp_dt'].dt.tz is None:
+                    df['timestamp_dt'] = df['timestamp_dt'].dt.tz_localize('UTC')
+            
+            fr_df['timestamp'] = pd.to_datetime(fr_df['timestamp'], utc=True)
+            
+            df = df.sort_values('timestamp_dt')
+            fr_df = fr_df.sort_values('timestamp')
+            
+            df = pd.merge_asof(
+                df, 
+                fr_df[['timestamp', 'funding_rate']], 
+                left_on='timestamp_dt',
+                right_on='timestamp',
+                direction='backward'
+            )
+            
+            # Clean up merge artifacts
+            if 'timestamp_y' in df.columns:
+                df.drop(columns=['timestamp_y'], inplace=True)
+            if 'timestamp_x' in df.columns:
+                df.rename(columns={'timestamp_x': 'timestamp'}, inplace=True)
+            if 'timestamp_dt' in df.columns:
+                df.drop(columns=['timestamp_dt'], inplace=True)
+
+            df['funding_rate'] = df['funding_rate'].astype(float)
+            df['funding_rate'] = df['funding_rate'].fillna(0.0)
+        else:
+            df['funding_rate'] = 0.0
+
+        return df.to_dict('records')
+
+    except Exception as e:
+        logger.error(f"Failed to enhance candles for {symbol}: {e}")
+        # Return original candles with default values for new fields
+        for candle in candles:
+            if 'vwap' not in candle:
+                candle['vwap'] = (candle.get('open', 0) + candle.get('high', 0) + 
+                                 candle.get('low', 0) + candle.get('close', 0)) / 4.0
+            if 'funding_rate' not in candle:
+                candle['funding_rate'] = 0.0
+        return candles
+
+
+def backfill_funding_rate_in_csv(
+    symbols: List[str],
+    base_dir: str = "data/klines",
+    interval: str = "1m",
+    exchange=None
+) -> Dict[str, int]:
+    """
+    Backfill funding_rate for already-downloaded CSV data by re-merging
+    funding rate history over the CSV timestamp range.
+
+    Args:
+        symbols: List of symbols to backfill
+        base_dir: Base directory for CSV files
+        interval: Interval string like '1m'
+        exchange: CCXT exchange instance (optional)
+
+    Returns:
+        Dict mapping symbol -> number of rows updated
+    """
+    if exchange is None:
+        exchange = ccxt.okx()
+
+    results: Dict[str, int] = {}
+
+    for symbol in symbols:
+        symbol_safe = symbol.replace("/", "_")
+        dirpath = os.path.join(base_dir, symbol_safe)
+        filepath = os.path.join(dirpath, f"{symbol_safe}_{interval}.csv")
+
+        if not os.path.exists(filepath):
+            logger.warning(f"Backfill skipped, file not found: {filepath}")
+            continue
+
+        try:
+            df = pd.read_csv(filepath)
+        except Exception as e:
+            logger.error(f"Backfill failed to read {filepath}: {e}")
+            continue
+
+        if 'timestamp' not in df.columns:
+            logger.warning(f"Backfill skipped, missing timestamp column: {filepath}")
+            continue
+
+        df['timestamp_dt'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+        if df['timestamp_dt'].isna().all():
+            logger.warning(f"Backfill skipped, invalid timestamps: {filepath}")
+            continue
+
+        start_time_dt = df['timestamp_dt'].min()
+        end_time_dt = df['timestamp_dt'].max()
+
+        fr_results = fetch_funding_rates_batch(
+            exchange,
+            [symbol],
+            start_time=start_time_dt,
+            end_time=end_time_dt
+        )
+        fr_df = fr_results.get(symbol)
+
+        if fr_df is None or fr_df.empty:
+            logger.warning(f"Backfill skipped, no funding rate data for {symbol}")
+            continue
+
+        fr_df['timestamp'] = pd.to_datetime(fr_df['timestamp'], utc=True)
+
+        # Remove existing funding_rate to avoid suffix confusion
+        if 'funding_rate' in df.columns:
+            df = df.drop(columns=['funding_rate'])
+
+        df = df.sort_values('timestamp_dt')
+        fr_df = fr_df.sort_values('timestamp')
+
+        merged = pd.merge_asof(
+            df,
+            fr_df[['timestamp', 'funding_rate']],
+            left_on='timestamp_dt',
+            right_on='timestamp',
+            direction='backward'
+        )
+
+        # Clean up merge artifacts
+        if 'timestamp_x' in merged.columns:
+            merged.rename(columns={'timestamp_x': 'timestamp'}, inplace=True)
+        if 'timestamp_y' in merged.columns:
+            merged.drop(columns=['timestamp_y'], inplace=True)
+        if 'timestamp_dt' in merged.columns:
+            merged.drop(columns=['timestamp_dt'], inplace=True)
+
+        merged['funding_rate'] = merged['funding_rate'].astype(float).fillna(0.0)
+
+        try:
+            merged.to_csv(filepath, index=False)
+            results[symbol] = len(merged)
+            logger.info(f"Backfilled funding_rate for {symbol}: {len(merged)} rows")
+        except Exception as e:
+            logger.error(f"Backfill failed to write {filepath}: {e}")
+
+    return results
+
 def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args=None, output_format: str = "csv", postgres_storage: PostgreSQLStorage = None, timeframe: str = None) -> Dict[str, pd.DataFrame]:
     """
     Fetch latest 1m candles for specified symbols via REST API within the given time range.
@@ -1447,7 +1767,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
     Returns:
         Dict of symbol -> DataFrame with latest data
     """
-    print(f"DEBUG: update_latest_data called with {len(symbols) if symbols else 0} symbols")  # Debug print
+    logger.debug(f"DEBUG: update_latest_data called with {len(symbols) if symbols else 0} symbols")  # Debug print
     if symbols is None:
         symbols = load_symbols()
 
@@ -1503,7 +1823,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
     # Check if incremental collection is enabled
     enable_incremental = config.get("data_collection", {}).get("enable_incremental", True)
-    print(f"DEBUG: enable_incremental = {enable_incremental}")  # Debug print
+    logger.debug(f"DEBUG: enable_incremental = {enable_incremental}")  # Debug print
 
     # Initialize CCXT exchange once for all symbols
     exchange = ccxt.okx({
@@ -1514,6 +1834,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
     # Load markets once to ensure symbol mapping for all symbols
     exchange.load_markets()
+    market_type = config.get("data", {}).get("market_type")
 
     for symbol in symbols:
         if _shutdown_requested:
@@ -1663,9 +1984,9 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
             # Calculate fetch window for this symbol if incremental is enabled
             if enable_incremental:
-                print(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
+                logger.debug(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
                 adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir, timeframe, output_format, postgres_storage)
-                print(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}, adjusted_start={adjusted_start}, adjusted_end={adjusted_end}")  # Debug print
+                logger.debug(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}, adjusted_start={adjusted_start}, adjusted_end={adjusted_end}")  # Debug print
                 if not should_fetch:
                     logger.info(f"Skipping {symbol} - no new data needed")
                     continue
@@ -1704,6 +2025,25 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             consecutive_empty_responses = 0
             max_empty_responses = 3  # Stop after 3 consecutive empty responses
 
+            market_symbol = resolve_market_symbol(symbol, exchange, market_type)
+            exchange_options = getattr(exchange, "options", {}) or {}
+            default_type = exchange_options.get("defaultType")
+            market_info = None
+            exchange_markets = getattr(exchange, "markets", None)
+            if isinstance(exchange_markets, dict):
+                market_info = exchange_markets.get(market_symbol)
+
+            if market_info:
+                logger.info(
+                    f"{symbol}: market_type={market_type}, ccxt_defaultType={default_type}, "
+                    f"market_symbol={market_symbol}, market_info.type={market_info.get('type')}, "
+                    f"swap={market_info.get('swap')}, future={market_info.get('future')}, spot={market_info.get('spot')}"
+                )
+            else:
+                logger.info(
+                    f"{symbol}: market_type={market_type}, ccxt_defaultType={default_type}, market_symbol={market_symbol}, market_info=NotFound"
+                )
+
             logger.info(f"Fetching data for {symbol} from {symbol_start_time} to {symbol_end_time}")
 
             while request_count < max_requests:
@@ -1726,18 +2066,6 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
 
                 try:
                     # Use CCXT to fetch OHLCV data
-                    from scripts.symbol_utils import get_ccxt_symbol
-                    market_symbol = get_ccxt_symbol(normalize_symbol(symbol))
-                    # If the exchange has markets loaded and it's a dict, try to find best matching market
-                    exchange_markets = getattr(exchange, 'markets', None)
-                    if isinstance(exchange_markets, dict):
-                        if market_symbol not in exchange_markets:
-                            # try to find a matching market key
-                            for mk in exchange_markets:
-                                mk_norm = mk.replace('-', '/').replace('_', '/').upper()
-                                if mk_norm == market_symbol or mk_norm.startswith(market_symbol + ":"):
-                                    market_symbol = mk
-                                    break
                     ohlcv = exchange.fetch_ohlcv(
                         market_symbol,
                         timeframe=timeframe,
@@ -1876,6 +2204,9 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         candles_to_save_count = (len(all_candles) // PERIODIC_SAVE_THRESHOLD) * PERIODIC_SAVE_THRESHOLD
                         candles_to_save = all_candles[:candles_to_save_count]
                         
+                        # Enhance before saving
+                        candles_to_save = enhance_candles(candles_to_save, symbol, exchange)
+
                         if save_collected_candles(candles_to_save, save_type="periodic"):
                             # Remove saved candles from the list, keep only unsaved ones
                             all_candles = all_candles[candles_to_save_count:]
@@ -1887,6 +2218,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Save collected data before exiting
                     if all_candles:
                         logger.warning(f"Saving {len(all_candles)} collected candles before shutdown")
+                        all_candles = enhance_candles(all_candles, symbol, exchange)
                         save_collected_candles(all_candles, save_type="error")
                     raise  # Re-raise to propagate the interrupt
                 except ccxt.NetworkError as e:
@@ -1894,6 +2226,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Save collected data before exiting due to error
                     if all_candles:
                         logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to network error")
+                        all_candles = enhance_candles(all_candles, symbol, exchange)
                         save_collected_candles(all_candles, save_type="error")
                         
                         # Load the saved data into result to ensure it's returned
@@ -1910,6 +2243,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Save collected data before exiting due to error
                     if all_candles:
                         logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to exchange error")
+                        all_candles = enhance_candles(all_candles, symbol, exchange)
                         save_collected_candles(all_candles, save_type="error")
                         
                         # Load the saved data into result to ensure it's returned
@@ -1926,6 +2260,7 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Save collected data before exiting due to error
                     if all_candles:
                         logger.warning(f"Saving {len(all_candles)} collected candles before exiting due to unexpected error")
+                        all_candles = enhance_candles(all_candles, symbol, exchange)
                         save_collected_candles(all_candles, save_type="error")
                         
                         # Load the saved data into result to ensure it's returned
@@ -1944,22 +2279,32 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 # Save any collected data before moving to next symbol
                 if all_candles:
                     logger.info(f"Saving {len(all_candles)} collected candles before moving to next symbol")
+                    all_candles = enhance_candles(all_candles, symbol, exchange)
                     save_collected_candles(all_candles, save_type="periodic")
                 else:
                     logger.warning(f"No candles collected for {symbol} after {max_requests} requests, skipping to next symbol")
                 # Skip the rest of processing for this symbol and move to next
                 continue  # This will go to the next iteration of the 'for symbol in symbols:' loop
 
+                
+            # Loop finished or broken
+            
             if all_candles:
-                logger.info(f"Successfully collected {len(all_candles)} candles for {symbol} in {request_count} requests")
+                # Enhance remaining candles
+                all_candles = enhance_candles(all_candles, symbol, exchange)
+
+                logger.info(f"Successfully collected {len(all_candles)} candles for {symbol} in {request_count} requests (with VWAP & Funding Rate)")
                 
                 # Save collected candles using the helper (efficiently handles append/merge)
                 save_collected_candles(all_candles, save_type="final")
                 
                 # Store the new data in result (caller only uses keys, but good for completeness)
+                # Re-create DF from all_candles which now has new columns
                 df = pd.DataFrame(all_candles)
                 if not df.empty and 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
+                    # valid timestamp handling
+                    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
                 result[symbol] = df
             else:
                 logger.info(f"No new candles collected for {symbol} in the specified range")
@@ -1990,11 +2335,11 @@ def update_latest_data_with_qlib(symbols=None, output_dir="data/klines"):
     qlib.init(provider_uri="data/qlib_data", region="cn")
     for symbol in updated_data:
         D.features([symbol], fields=["$close", "$volume"])
-    print("Qlib data provider updated with the latest data.")
+    logger.debug("Qlib data provider updated with the latest data.")
 
 async def main(args):
     """Main function to start the data collector."""
-    print("DEBUG: main function called")  # Debug print
+    logger.debug("DEBUG: main function called")  # Debug print
     logger.info("Starting OKX data collector")
 
     # Configure CCXT logging based on command line argument
@@ -2050,11 +2395,26 @@ async def main(args):
     set_global_output_config(output_format, postgres_storage)
 
     symbols = load_symbols()
+    
+    # Override symbols if provided in args
+    if hasattr(args, 'symbols') and args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(',')]
+        logger.info(f"Using symbols from command line: {symbols}")
+
     if not symbols:
         logger.error("No symbols loaded, exiting")
         return
 
     logger.info(f"Collecting data for {len(symbols)} symbols: {symbols[:5]}...")
+
+    # Optional backfill for existing CSV funding_rate
+    if getattr(args, 'backfill_funding_rate', False):
+        backfill_symbols = symbols
+        if hasattr(args, 'symbols') and args.symbols:
+            backfill_symbols = [s.strip() for s in args.symbols.split(',')]
+        backfill_funding_rate_in_csv(backfill_symbols, base_dir="data/klines", interval=TIMEFRAME)
+        logger.info("Funding rate backfill complete, exiting.")
+        return
 
     # Update the latest data with the provided arguments
     timeframes = args.timeframes.split(',') if getattr(args, 'timeframes', None) else [TIMEFRAME]
@@ -2424,10 +2784,21 @@ parser.add_argument(
     action="store_true",
     help="Collect data once and exit (no polling or websocket loop)"
 )
+parser.add_argument(
+    "--symbols",
+    type=str,
+    default=None,
+    help="Comma-separated list of symbols to collect (e.g., 'ETH/USDT'). Overrides config."
+)
+parser.add_argument(
+    "--backfill-funding-rate",
+    action="store_true",
+    help="Backfill funding_rate for existing CSV data and exit"
+)
 
 
 if __name__ == '__main__':
-    print("Reminder: Ensure 'conda activate qlib' before running")
+    logger.debug("Reminder: Ensure 'conda activate qlib' before running")
 
     # Parse arguments
     args = parser.parse_args()

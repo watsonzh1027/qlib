@@ -15,6 +15,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 import argparse
+from datetime import datetime, timezone
 
 # Add project root to Python path to enable imports
 project_root = Path(__file__).parent.parent
@@ -58,6 +59,13 @@ def calculate_proportion_segments(start_date, end_date, proportions):
         current = end_seg
     
     return result
+
+def weighted_average(x, weights):
+    """Calculate weighted average."""
+    try:
+        return np.average(x, weights=weights.loc[x.index])
+    except Exception:
+        return np.nan
 
 
 class PostgreSQLStorage:
@@ -130,6 +138,56 @@ class PostgreSQLStorage:
                 break
 
         raise ConnectionError(f"Could not establish database connection: {last_error}")
+
+    def get_funding_rates(self, symbol: str,
+                         start_date: Optional[str] = None,
+                         end_date: Optional[str] = None) -> pd.DataFrame:
+        """
+        Retrieve funding rate data for a specific symbol.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTC/USDT', 'ETHUSDT')
+            start_date: Start date in ISO format (optional)
+            end_date: End date in ISO format (optional)
+
+        Returns:
+            DataFrame with funding rate data
+        """
+        if not self.connection:
+            raise ConnectionError("Database connection not established")
+
+        query = sql.SQL(
+            "SELECT timestamp, funding_rate FROM funding_rates WHERE symbol = %s"
+        )
+        params = [symbol]
+
+        if start_date:
+            query = sql.SQL("{} AND timestamp >= %s").format(query)
+            params.append(start_date)
+
+        if end_date:
+            query = sql.SQL("{} AND timestamp <= %s").format(query)
+            params.append(end_date)
+
+        query = sql.SQL("{} ORDER BY timestamp").format(query)
+
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+                if not rows:
+                    logger.info(f"No funding rate data found for {symbol}")
+                    return pd.DataFrame()
+
+                df = pd.DataFrame(rows)
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                logger.info(f"Retrieved {len(df)} funding rate records for {symbol}")
+                return df
+
+        except psycopg2.Error as e:
+            logger.warning(f"Error fetching funding rates for {symbol}: {e}")
+            return pd.DataFrame()
 
     def get_kline_data(self, symbol: str, interval: str,
                       start_date: Optional[str] = None,
@@ -359,9 +417,11 @@ class PostgreSQLStorage:
 class DumpDataCrypto(DumpDataAll):
     """Custom dumper for crypto data that skips calendar creation since crypto markets are 24/7."""
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, mode="all", *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.mode = mode
         self.all_data = {}  # Will be set externally
+        self._old_calendar_list = []
     
     def get_symbol_from_file(self, file_path: Path) -> str:
         """Convert file path to symbol, handling hierarchical naming."""
@@ -424,98 +484,170 @@ class DumpDataCrypto(DumpDataAll):
         _df[self.date_field_name] = pd.to_datetime(_df[self.date_field_name])
         _df = _df.set_index(self.date_field_name)
         
-        # Check for excessive NaN values before processing
+        # Check for excessive NaN values
         nan_ratio = _df.isnull().mean().mean()
-        logger.info(f"{features_dir.name}: NaN ratio = {nan_ratio:.3f}")
         
         if nan_ratio > 0.5:  # If more than 50% NaN, skip this symbol
             logger.warning(f"{features_dir.name}: Too many NaN values ({nan_ratio:.3f}), skipping")
             return
         
-        # Fill NaN values with forward/backward fill, then interpolation, then 0
+        # Fill NaN values
         _df = _df.ffill().bfill().interpolate(method='linear').fillna(0)
         
-        # Reindex to calendar timestamps to align with qlib expectations
-        # Load calendar
-        calendar_path = self._features_dir.parent / 'calendars' / f'{self.freq}.txt'
-        if calendar_path.exists():
-            with open(calendar_path, 'r') as f:
-                calendar_timestamps = [pd.Timestamp(line.strip()).replace(tzinfo=None) for line in f.readlines()]
-            
-            # Convert data index to naive datetime (remove timezone) to match calendar
-            _df.index = _df.index.tz_localize(None)
-            
-            # Reindex data to calendar timestamps
-            _df = _df.reindex(calendar_timestamps, method='nearest')
-            logger.info(f"{features_dir.name}: Reindexed to {len(calendar_timestamps)} calendar timestamps, data shape: {_df.shape}")
+        # Calculate start index
+        # For ALL mode: start_index is relative to the FULL calendar
+        # For UPDATE mode: we are appending, so we just write the values.
+        # But wait, Qlib bin file structure is [start_index, value1, value2...]
+        # If we append, we are just adding valueX, valueY... to the end of the file.
+        # The start_index at the beginning of the file remains valid for the *entire* sequence.
+        # However, we must ensure that the new data strictly follows the existing data in the calendar.
         
-        # Get dump fields (exclude timestamp as it's the index)
+        # We assume _df contains ONLY new data in UPDATE mode.
+        
+        # Determine mode logic
+        # If file exists and mode is update -> Append
+        # Else -> Write new
+        
+        # Use simple heuristic: if bin file exists and size > 0, append.
+        
         dump_fields = self.get_dump_fields(_df.columns)
         dump_fields = [f for f in dump_fields if f != self.date_field_name]
         
         for field in dump_fields:
             if field not in _df.columns:
                 continue
-            
-            # Get the start index for this data (use the index positions)
-            start_index = 0  # Start from beginning since no calendar alignment
-            
-            # Fill NaN values with forward/backward fill, then interpolation, then 0
-            field_data = _df[field].ffill().bfill().interpolate(method='linear').fillna(0).values
-            
-            # Save in qlib format: [start_index, values...]
-            # Qlib's FileFeatureStorage forces lower() on field and freq
-            # Use standard name: field.bin
-            # But Qlib's default FILE storage uses `field.freq.bin` IF configured with freq?
-            # Actually standard binary format is just `field.bin` inside instrument dir usually
-            # But let's check `file_storage.py` error provided earlier:
-            # `self.dpm.get_data_uri(self._freq_file).joinpath(f"{self.storage_name}s", self.file_name)`
-            # file_name is `field.freq.bin` by default in Qlib if not changed.
-            # But we are creating separate dirs per freq.
-            # So if we init Qlib with `provider_uri=data/crypto_60min`, and freq=60min.
-            # Does Qlib look for `close.60min.bin` or `close.bin`?
-            # Qlib's `FileFeatureStorage`: `file_name` property uses `name` + `freq` suffix?
-            # Actually, `features/eth_usdt/close.day.bin` is standard for day freq.
-            # If freq is 60min, `close.60min.bin`.
-            # So the PREVIOUS FILENAME was actually CORRECT: `close.60min.bin`.
-            
-            # The issue was HIERARCHY. `features/eth_usdt/60min/future/close.60min.bin` vs `features/eth_usdt/close.60min.bin`.
-            # We switched to `features/eth_usdt/` by changing `code`.
-            # So we SHOULD KEEP `close.60min.bin`.
-            
-            # Reverting this part of instruction - keeping same filename format, but code handling was fixed in previous steps.
-            # Wait, I claimed I need to change filename format.
-            # Let's verify standard Qlib expectation.
-            # `FileFeatureStorage` -> `file_name` -> `f"{self.field}.{self.freq}.bin"`.
-            # So `close.60min.bin` IS CORRECT.
-            # I should NOT change this line.
-            
+                
+            field_data = _df[field].values.astype(np.float32)
             bin_path = features_dir.joinpath(f"{field.lower()}.{self.freq.lower()}.bin")
-            data_array = np.concatenate([[start_index], field_data]).astype(np.float32)
-            data_array.astype("<f").tofile(str(bin_path))
-            logger.info(f"Saved {field} to {bin_path}, size: {len(data_array)}")
+            
+            if self.mode == "update" and bin_path.exists():
+                # Append mode
+                with bin_path.open("ab") as fp:
+                    field_data.tofile(fp)
+                logger.debug(f"Appended {field} to {bin_path}, size: {len(field_data)}")
+            else:
+                # Write mode (ALL or new file)
+                # Need to calculate start_index relative to the GLOBAL calendar
+                # In DumpDataAll, this is done via self.get_datetime_index(_df, calendar_list)
+                # But here we are processing per-symbol.
+                # If it's a new file in ALL mode, start_index is the index of the first timestamp 
+                # in the full calendar.
+                
+                # To get the full calendar, we use self._calendars_list which is set in dump()
+                if not self._calendars_list:
+                     logger.warning("Calendar list empty, cannot calculate start index.")
+                     start_index = 0
+                else:
+                     try:
+                         # Ensure checking against timezone-naive or aware consistently
+                         # self._calendars_list are Timestamps. _df.index are Timestamps.
+                         # normalize to naive UTC
+                         first_time = _df.index.min()
+                         if first_time.tzinfo:
+                             first_time = first_time.tz_localize(None)
+                         
+                         # Find index
+                         # self._calendars_list is sorted.
+                         import bisect
+                         # bisect_left returns insertion point. 
+                         # We want exact match usually, or nearest?
+                         # Qlib expects aligned data.
+                         start_index = bisect.bisect_left(self._calendars_list, first_time)
+                         
+                         # check if match
+                         if start_index < len(self._calendars_list) and self._calendars_list[start_index] != first_time:
+                             # warn?
+                             pass
+                     except Exception as e:
+                         logger.warning(f"Error calculating start index: {e}, default to 0")
+                         start_index = 0
+
+                data_array = np.concatenate([[start_index], field_data]).astype(np.float32)
+                data_array.astype("<f").tofile(str(bin_path))
+                logger.debug(f"Saved {field} to {bin_path}, start_index: {start_index}, size: {len(data_array)}")
     
     def dump(self):
-        # For crypto, create a simple calendar since markets are 24/7
+        # 1. Prepare Calendar
+        if self.mode == "update":
+            # Load existing calendar
+            qlib_freq = convert_interval_to_qlib_freq(self.freq)
+            calendar_path = self._calendars_dir.joinpath(f"{qlib_freq}.txt")
+            if calendar_path.exists():
+                with open(calendar_path, "r") as f:
+                    self._old_calendar_list = [pd.Timestamp(line.strip()) for line in f.readlines()]
+            else:
+                logger.warning("Update mode but no existing calendar found. Switching behavior to 'all'.")
+        
+        # 2. Merge/Create Calendar
         self._dump_calendars_crypto()
-        self._dump_instruments_crypto()
+        
+        # 3. Features
         self._dump_features()
+        
+        # 4. Instruments
+        self._dump_instruments_crypto()
     
     def _dump_instruments_crypto(self):
         """Create instruments file for crypto data using all_data."""
         logger.info("start dump instruments for crypto......")
+        
+        # In update mode, we need to merge with existing instruments
+        existing_instruments = {}
+        if self.mode == "update":
+            inst_path = self._instruments_dir.joinpath(self.INSTRUMENTS_FILE_NAME)
+            if inst_path.exists():
+                try:
+                    df_inst = pd.read_csv(inst_path, sep='\t', header=None, names=['symbol', 'start', 'end'])
+                    existing_instruments = df_inst.set_index('symbol').to_dict(orient='index')
+                except Exception as e:
+                    logger.warning(f"Failed to load existing instruments: {e}")
+
         date_range_list = []
         
+        # Process current batch
         for symbol, df in self.all_data.items():
             if not df.empty and self.date_field_name in df.columns:
                 timestamps = pd.to_datetime(df[self.date_field_name])
                 start_time = timestamps.min()
                 end_time = timestamps.max()
-                begin_time = self._format_datetime(start_time)
-                end_time = self._format_datetime(end_time)
-                # Store symbol as is (it should already be normalized)
-                inst_fields = [symbol, begin_time, end_time]
+                
+                # Check against existing
+                if symbol in existing_instruments:
+                    old_start = pd.to_datetime(existing_instruments[symbol]['start'])
+                    old_end = pd.to_datetime(existing_instruments[symbol]['end'])
+
+                    # Ensure timezone consistency
+                    if start_time.tzinfo is not None and old_start.tzinfo is None:
+                         old_start = old_start.tz_localize('UTC')
+                    if end_time.tzinfo is not None and old_end.tzinfo is None:
+                         old_end = old_end.tz_localize('UTC')
+                         
+                    # Or conversely if start_time is naive (unlikely given DB source but possible from CSV)
+                    if start_time.tzinfo is None and old_start.tzinfo is not None:
+                         start_time = start_time.tz_localize('UTC')
+                    if end_time.tzinfo is None and old_end.tzinfo is not None:
+                         end_time = end_time.tz_localize('UTC')
+                    
+                    # Update range
+                    start_time = min(start_time, old_start)
+                    end_time = max(end_time, old_end)
+                    
+                    # Remove from existing so we don't duplicate
+                    del existing_instruments[symbol]
+                
+                begin_time_str = self._format_datetime(start_time)
+                end_time_str = self._format_datetime(end_time)
+                
+                inst_fields = [symbol, begin_time_str, end_time_str]
                 date_range_list.append(f"{self.INSTRUMENTS_SEP.join(inst_fields)}")
+        
+        # Add remaining existing instruments that weren't in the update batch
+        for symbol, dates in existing_instruments.items():
+            inst_fields = [symbol, dates['start'], dates['end']]
+            date_range_list.append(f"{self.INSTRUMENTS_SEP.join(inst_fields)}")
+        
+        # Sort by symbol
+        date_range_list.sort()
         
         self.save_instruments(date_range_list)
         logger.info("end of instruments dump.\n")
@@ -525,23 +657,23 @@ class DumpDataCrypto(DumpDataAll):
         logger.info("start dump calendars for crypto......")
         
         # use dates from memory
-        all_dates = []
+        new_dates = []
         for qlib_symbol, df in self.all_data.items():
-            all_dates.extend(df[self.date_field_name].tolist())
+            new_dates.extend(df[self.date_field_name].tolist())
         
-        if not all_dates:
+        if not new_dates and not self._old_calendar_list:
             logger.warning("No data found to generate calendar")
             return
             
-        # Ensure all dates are naive
-        # If they are mixed aware/naive, to_datetime(utc=True) makes them all aware (UTC)
-        # Then we strip TZ
-        start = time.time()
-        dt_index = pd.to_datetime(all_dates, utc=True).tz_localize(None)
-        all_dates = sorted(list(set(dt_index)))
-        logger.info(f"Calendar dedup/sort processed in {time.time()-start:.2f}s")
+        # Combine
+        combined_dates = self._old_calendar_list + new_dates
         
-        self._calendars_list = all_dates
+        # Dedup and Sort
+        start = time.time()
+        # Ensure all naive UTC 
+        dt_index = pd.to_datetime(combined_dates, utc=True).tz_localize(None)
+        self._calendars_list = sorted(list(set(dt_index)))
+        logger.info(f"Calendar dedup/sort processed in {time.time()-start:.2f}s")
         
         # Save to target freq
         qlib_freq = convert_interval_to_qlib_freq(self.freq)
@@ -551,7 +683,7 @@ class DumpDataCrypto(DumpDataAll):
             for d in self._calendars_list:
                 f.write(f"{d}\n")
                 
-        logger.info(f"Created calendar {qlib_freq} with {len(self._calendars_list)} timestamps")
+        logger.info(f"Updated calendar {qlib_freq} with {len(self._calendars_list)} timestamps")
         logger.info("end of calendars dump.\n")
 
 """
@@ -719,13 +851,58 @@ def convert_to_qlib(source: str = None, freq: str = None):
                     df[date_field_name] = pd.to_datetime(df[date_field_name])
                     df = df.set_index(date_field_name)
                     # Resample OHLCV data appropriately
-                    resampled = df.resample(target_freq).agg({
+                    agg_dict = {
                         'open': 'first',
                         'high': 'max', 
                         'low': 'min',
                         'close': 'last',
                         'volume': 'sum'
-                    }).dropna().reset_index()
+                    }
+                    
+                    # Handle funding_rate separately with forward-fill
+                    # Funding rates settle every 8 hours (not continuous like OHLCV)
+                    # We need to forward-fill the 8-hour values to finer timeframes
+                    funding_rate_col = None
+                    if 'funding_rate' in df.columns:
+                        # Save funding_rate column before resampling
+                        # Keep the index for proper resampling
+                        funding_rate_col = df[['funding_rate']].copy()
+                        # Don't include in agg_dict - handle separately
+                        df = df.drop(columns=['funding_rate'])
+                    
+                    if 'vwap' in df.columns:
+                        # Use weighted average for VWAP if volume exists, else mean
+                        if 'volume' in df.columns:
+                            # We need a lambda that can access the volume of the specific group
+                            # Standard groupby agg doesn't easily support multi-column aggregation functions
+                            # So we do a custom apply or simplified mean if too complex for this script config
+                            # For robustness in this script, let's use a custom apply or just mean.
+                            # Standard Pandas agg with lambda only gets the series of the column.
+                            # So we cannot access weights. 
+                            # Workaround: Calculate (vwap * volume) -> cum_amount, resample sum, then divide by vol sum.
+                            df['amount'] = df['vwap'] * df['volume']
+                            agg_dict['amount'] = 'sum'
+                            # We will recalculate vwap after resampling
+                        else:
+                            agg_dict['vwap'] = 'mean'
+
+                    resampled = df.resample(target_freq).agg(agg_dict).dropna().reset_index()
+                    
+                    # Post-processing to recover VWAP if we used amount
+                    if 'amount' in resampled.columns and 'volume' in resampled.columns:
+                         resampled['vwap'] = resampled['amount'] / resampled['volume']
+                         resampled.drop(columns=['amount'], inplace=True)
+                    
+                    # Forward-fill funding_rate from 8-hour native frequency
+                    # Funding rates don't "aggregate" - they propagate until next settlement
+                    if funding_rate_col is not None:
+                        # Resample funding_rate using forward-fill method
+                        funding_resampled = funding_rate_col.resample(target_freq).ffill()
+                        # Merge back with OHLCV data
+                        resampled = resampled.set_index(date_field_name)
+                        resampled = resampled.join(funding_resampled, how='left')
+                        resampled = resampled.reset_index()
+                         
                     df = resampled
                     print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
                 
@@ -765,21 +942,127 @@ def convert_to_qlib(source: str = None, freq: str = None):
                 'low': 'low_price',
                 'close': 'close_price',
                 'volume': 'volume',
-                'funding_rate': 'funding_rate'
+                'funding_rate': 'funding_rate',
+                'vwap': 'vwap'
             }
         )
+        
+        # Determine source interval for DB (usually 1m for resampling)
+        source_interval = config.get('data_service', {}).get('base_interval', '1m')
+        
+        # Auto-detect start time for incremental update
+        start_time_db = None
+        mode = "all"
+        
+        # Check if calendar exists
+        qlib_freq = convert_interval_to_qlib_freq(target_freq)
+        calendar_file = Path(output_dir) / "calendars" / f"{qlib_freq}.txt"
+        
+        if calendar_file.exists() and calendar_file.stat().st_size > 0:
+            try:
+                # Read last line efficiently
+                import subprocess
+                last_line = subprocess.check_output(['tail', '-1', str(calendar_file)]).decode().strip()
+                if last_line:
+                    last_date = pd.Timestamp(last_line)
+                    # Fetch from next interval
+                    # Add small buffer or exactly one interval? 
+                    # get_kline_data is inclusive for start_date.
+                    # so if we ask for last_date, we get duplicate.
+                    # let's ask for > last_date. DB function uses >=.
+                    # We can filter later or add 1 second/interval.
+                    start_time_db = (last_date + pd.Timedelta(seconds=1)).isoformat()
+                    mode = "update"
+                    logger.info(f"Detected existing data up to {last_date}. Running in UPDATE mode starting from {start_time_db}.")
+            except Exception as e:
+                logger.warning(f"Failed to read existing calendar, falling back to full mode: {e}")
+        
         with db_storage:
-            symbols = db_storage.get_available_symbols(interval=interval)
+            symbols = db_storage.get_available_symbols(interval=source_interval)
+            
+            if not symbols and source_interval == '1m':
+                # Try 1h if 1m is empty
+                logger.info("No 1m data found, trying 1h...")
+                symbols = db_storage.get_available_symbols(interval='1h')
+                source_interval = '1h'
+            
+            logger.info(f"Fetching data for {len(symbols)} symbols from DB (Start: {start_time_db})...")
+            
             for symbol in symbols:
-                df = db_storage.get_kline_data(symbol, interval)
+                # Pass start_date to incremental fetch
+                df = db_storage.get_kline_data(symbol, source_interval, start_date=start_time_db)
                 if not df.empty:
                     # Ensure timestamp is datetime
                     df[date_field_name] = pd.to_datetime(df[date_field_name])
+                    
+                    # Merge funding rates if available
+                    try:
+                        fr_df = db_storage.get_funding_rates(symbol, start_date=start_time_db)
+                        if not fr_df.empty:
+                            logger.info(f"{symbol}: Merging {len(fr_df)} funding rate records with OHLCV data")
+                            # Use merge_asof to align funding rates (8-hour) with OHLCV timestamps
+                            # Direction='backward' means use the most recent past funding rate
+                            df = pd.merge_asof(
+                                df.sort_values(date_field_name),
+                                fr_df[['timestamp', 'funding_rate']].rename(columns={'timestamp': date_field_name}),
+                                on=date_field_name,
+                                direction='backward'
+                            )
+                            # Fill any remaining NaN with 0
+                            df['funding_rate'] = df['funding_rate'].fillna(0)
+                            logger.info(f"{symbol}: Funding rates merged successfully")
+                        else:
+                            logger.info(f"{symbol}: No funding rate data available, setting to 0")
+                            df['funding_rate'] = 0.0
+                    except Exception as e:
+                        logger.warning(f"{symbol}: Error merging funding rates: {e}. Setting to 0")
+                        df['funding_rate'] = 0.0
+                    
+                    # Resample if target_freq is different from source_interval
+                    # 1m -> 1min, 1h -> 60min
+                    source_qlib_freq = convert_interval_to_qlib_freq(source_interval)
+                    
+                    if target_freq != source_qlib_freq:
+                        logger.info(f"Resampling {symbol} from {source_qlib_freq} to {target_freq}...")
+                        df = df.set_index(date_field_name)
+                        # Resample OHLCV data
+                        agg_dict = {
+                            'open': 'first',
+                            'high': 'max', 
+                            'low': 'min',
+                            'close': 'last',
+                            'volume': 'sum'
+                        }
+                        
+                        # Add funding_rate if exists
+                        if 'funding_rate' in df.columns:
+                            agg_dict['funding_rate'] = 'last'
+
+                        # Handle VWAP for DB path                        
+                        if 'vwap' in df.columns:
+                            if 'volume' in df.columns:
+                                df['amount'] = df['vwap'] * df['volume']
+                                agg_dict['amount'] = 'sum'
+                            else:
+                                agg_dict['vwap'] = 'mean'
+                        # Add funding_rate if exists
+                        if 'funding_rate' in df.columns:
+                            agg_dict['funding_rate'] = 'last'
+                            
+                        resampled = df.resample(target_freq).agg(agg_dict).dropna().reset_index()
+                        
+                        # Post-processing to recover VWAP
+                        if 'amount' in resampled.columns and 'volume' in resampled.columns:
+                             resampled['vwap'] = resampled['amount'] / resampled['volume']
+                             resampled.drop(columns=['amount'], inplace=True)
+                             
+                        df = resampled
+                        logger.info(f"Resampled {symbol} to {target_freq}: {len(df)} rows")
+                    
                     # Validate data quality
                     quality_stats = db_storage.validate_data_quality(df)
                     if quality_stats['valid']:
                         # Normalize and format symbol to match project directory structure
-                        # Use simple structure: ETH_USDT
                         norm_symbol = normalize_symbol(symbol)
                         qlib_symbol = norm_symbol.upper()
 
@@ -816,7 +1099,8 @@ def convert_to_qlib(source: str = None, freq: str = None):
             symbol_field_name=symbol_field_name,
             exclude_fields=exclude_fields,
             include_fields=','.join(include_fields),
-            max_workers=4
+            max_workers=4,
+            mode=mode
         )
         # Pass all_data for calendar creation
         dumper.all_data = all_data
@@ -837,8 +1121,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert cryptocurrency data to Qlib format")
     parser.add_argument("--source", choices=["csv", "db", "both"], 
                        help="Data source: csv (CSV files), db (database), or both. If not specified, uses config data_source.")
-    parser.add_argument("--freq", help="Target frequency (e.g., 15min, 60min, 240min). Overrides config.")
+    parser.add_argument("--freq", action='append', help="Target frequency (e.g., 15min, 60min). Can be specified multiple times.")
+    parser.add_argument("--timeframes", action='append', help="Alias for --freq, supported for data_service compatibility.")
     args = parser.parse_args()
     
     source = args.source if args.source else 'db'
-    convert_to_qlib(source=source, freq=args.freq)
+    
+    # Collect all frequencies from both --freq and --timeframes
+    freqs = []
+    if args.freq:
+        freqs.extend(args.freq)
+    if args.timeframes:
+        freqs.extend(args.timeframes)
+    
+    # Remove duplicates but keep order
+    unique_freqs = []
+    for f in freqs:
+        if f not in unique_freqs:
+            unique_freqs.append(f)
+            
+    if not unique_freqs:
+        # If no freq provided, run once with default from config
+        convert_to_qlib(source=source)
+    else:
+        for f in unique_freqs:
+            logger.info(f"Starting conversion task for frequency: {f}")
+            convert_to_qlib(source=source, freq=f)

@@ -116,6 +116,9 @@ def objective_model(trial, model_type, folds, base_config, symbol):
     
     # 1. Suggest Model Params
     params = {}
+    frequency = trial.suggest_categorical("frequency", ["60min", "240min"])
+    params["frequency"] = frequency
+    
     if model_type == "lightgbm":
         params["learning_rate"] = trial.suggest_float("learning_rate", 0.01, 0.2, log=True)
         params["num_leaves"] = trial.suggest_int("num_leaves", 16, 255)
@@ -125,6 +128,12 @@ def objective_model(trial, model_type, folds, base_config, symbol):
     
     # 2. Update Config
     trial_config = base_config.copy()
+    if "workflow" not in trial_config: trial_config["workflow"] = {}
+    trial_config["workflow"]["frequency"] = frequency
+    
+    if "data" not in trial_config: trial_config["data"] = {}
+    trial_config["data"]["bin_data_dir"] = f"data/qlib_data/crypto_{frequency}"
+    
     if "training" not in trial_config: trial_config["training"] = {}
     if "models" not in trial_config["training"]: trial_config["training"]["models"] = {}
     if model_type not in trial_config["training"]["models"]: trial_config["training"]["models"][model_type] = {}
@@ -176,7 +185,14 @@ def objective_strategy(trial, folds, base_config, symbol, best_model_params, mod
     # 2. Update Config
     trial_config = base_config.copy()
     
-    # Inject Fixed Model Params (Just for consistency, though we use pretrained pickles)
+    # Inject Fixed Model Params (including Frequency)
+    best_freq = best_model_params.get("frequency", "240min")
+    if "workflow" not in trial_config: trial_config["workflow"] = {}
+    trial_config["workflow"]["frequency"] = best_freq
+    
+    if "data" not in trial_config: trial_config["data"] = {}
+    trial_config["data"]["bin_data_dir"] = f"data/qlib_data/crypto_{best_freq}"
+    
     if "training" not in trial_config: trial_config["training"] = {}
     if "models" not in trial_config["training"]: trial_config["training"]["models"] = {}
     if model_type not in trial_config["training"]["models"]: trial_config["training"]["models"][model_type] = {}
@@ -271,6 +287,12 @@ def run_strategy_tuning(args, base_config, symbol, folds, model_type, best_model
     
     pretrain_cfg_path = TMP_DIR / f"pretrain_{symbol.replace('/','_')}.json"
     pretrain_cfg = base_config.copy()
+    best_freq = best_model_params.get("frequency", "240min")
+    if "workflow" not in pretrain_cfg: pretrain_cfg["workflow"] = {}
+    pretrain_cfg["workflow"]["frequency"] = best_freq
+    if "data" not in pretrain_cfg: pretrain_cfg["data"] = {}
+    pretrain_cfg["data"]["bin_data_dir"] = f"data/qlib_data/crypto_{best_freq}"
+    
     if "training" not in pretrain_cfg: pretrain_cfg["training"] = {}
     if "models" not in pretrain_cfg["training"]: pretrain_cfg["training"]["models"] = {}
     if model_type not in pretrain_cfg["training"]["models"]: pretrain_cfg["training"]["models"][model_type] = {}
@@ -348,9 +370,15 @@ def main():
     logger.info(f"Target Symbols: {symbols}")
     
     # Generate Folds
+    workflow_cfg = base_config.get("workflow", {})
+    start_date = workflow_cfg.get("start_time", "2024-01-01")
+    end_date = workflow_cfg.get("end_time")
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        
     folds = generate_wfv_folds(
-        start_date="2022-01-01", 
-        end_date="2024-12-31", 
+        start_date=start_date, 
+        end_date=end_date, 
         n_folds=3
     )
     
@@ -391,6 +419,12 @@ def main():
             best_config["per_symbol_models"][symbol] = {
                 "model_type": args.model,
                 "model_params": best_model_params,
+                "workflow": {
+                    "frequency": best_model_params.get("frequency", "240min")
+                },
+                "data": {
+                    "bin_data_dir": f"data/qlib_data/crypto_{best_model_params.get('frequency', '240min')}"
+                },
                 "trading": {
                     "leverage": best_strat_params.get("leverage", 1),
                     "signal_threshold": best_strat_params.get("threshold", 0.0),

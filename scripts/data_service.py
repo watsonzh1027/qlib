@@ -43,7 +43,8 @@ import logging
 import argparse
 import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from qlib.utils.logging_config import setup_logging, startlog, endlog
 
@@ -179,6 +180,30 @@ class DataService:
         logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.stop()
     
+    def _is_funding_collection_time(self) -> bool:
+        """
+        Check if current time is within funding rate collection window.
+        
+        Funding rates settle every 8 hours at 00:00, 08:00, 16:00 UTC.
+        Collection should happen 5-10 minutes after settlement to allow API propagation.
+        
+        Returns:
+            True if within collection window, False otherwise
+        """
+        now = datetime.now(timezone.utc)
+        
+        # Check if we're at a settlement hour (0, 8, or 16)
+        if now.hour not in [0, 8, 16]:
+            return False
+        
+        # Check if within collection window (5-10 minutes after settlement)
+        collection_start = self.config.config.get('data_service', {}).get(
+            'funding_collection_window_start', 5)
+        collection_end = self.config.config.get('data_service', {}).get(
+            'funding_collection_window_end', 10)
+        
+        return collection_start <= now.minute < collection_end
+    
     def _update_status(self, **kwargs):
         """Update service status"""
         self.status.update(kwargs)
@@ -242,17 +267,36 @@ class DataService:
             # Calculate time range (last update to now)
             end_time = datetime.now()
             
-            if self.last_update_time:
-                start_time = self.last_update_time
+            # Try to get start_time from config (data_collection or workflow)
+            dc_config = self.config.config.get("data_collection", {})
+            wf_config = self.config.config.get("workflow", {})
+            
+            # Prioritize data_collection.start_time as it's intended for downloading
+            config_start = dc_config.get("start_time") or wf_config.get("start_time")
+            
+            logger.info(f"Config start_time found: {config_start}")
+            
+            if config_start:
+                try:
+                    # Pass the date string directly or parse to ensure validity
+                    start_time_to_pass = pd.to_datetime(config_start).strftime('%Y-%m-%dT%H:%M:%SZ')
+                except Exception as e:
+                    logger.warning(f"Failed to parse config start_time '{config_start}': {e}. Falling back to 365 days.")
+                    start_time_to_pass = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ')
             else:
-                # First run: collect last 7 days
-                start_time = end_time - timedelta(days=7)
+                logger.info("No start_time found in config. Falling back to 365 days.")
+                start_time_to_pass = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            
+            # Get output format from config
+            output_format = self.config.config.get('data_collection', {}).get('output', 'db')
             
             # Build command
             cmd = [
                 'python', 'scripts/okx_data_collector.py',
-                '--output', 'db',
-                '--start_time', start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                '--output', output_format,
+                '--timeframes', self.config.base_interval,
+                '--start_time', start_time_to_pass,
                 '--end_time', end_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 '--run-once'
             ]
@@ -285,7 +329,10 @@ class DataService:
     
     def _collect_funding_rates(self) -> bool:
         """
-        Collect funding rate data (conditional based on market_type)
+        Collect funding rate data (conditional based on market_type and settlement time).
+        
+        Funding rates settle every 8 hours (00:00, 08:00, 16:00 UTC).
+        Collection only happens during the collection window (5-10 min after settlement).
         
         Returns:
             True if successful or skipped, False if failed
@@ -295,6 +342,11 @@ class DataService:
             logger.info(f"Skipping funding rate collection (market_type={self.config.market_type}, "
                        f"enable_funding_rate={self.config.enable_funding_rate})")
             return True
+        
+        # Check if we're within the funding rate collection window
+        if not self._is_funding_collection_time():
+            logger.debug("Not within funding rate collection window (00:05-00:10, 08:05-08:10, 16:05-16:10 UTC)")
+            return True  # Not an error, just not time yet
         
         logger.info(f"Starting funding rate collection for {self.config.market_type} market...")
         
@@ -348,6 +400,65 @@ class DataService:
             logger.error(f"Funding rate collection error: {e}")
             return False
     
+    def _validate_funding_rate_settlements(self, postgres_storage) -> bool:
+        """
+        Validate funding rate data has proper 8-hour settlement intervals.
+        
+        Args:
+            postgres_storage: PostgreSQL storage instance
+        
+        Returns:
+            True if validation passed, False otherwise
+        """
+        try:
+            from okx_data_collector import load_symbols
+            
+            # Load symbols
+            symbols = load_symbols(self.config.symbols_file)
+            if not symbols:
+                logger.warning("No symbols loaded for funding rate validation")
+                return True
+            
+            # Check last 24 hours (should have 3 settlements)
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(hours=24)
+            
+            missing_count = 0
+            total_checked = 0
+            
+            for symbol in symbols[:5]:  # Sample first 5 symbols
+                try:
+                    df = postgres_storage.get_funding_rates(
+                        symbol=symbol,
+                        start_time=start_time,
+                        end_time=end_time
+                    )
+                    
+                    if df is not None and len(df) > 0:
+                        # Should have exactly 3 settlements in 24 hours
+                        expected_count = 3
+                        actual_count = len(df)
+                        
+                        if actual_count < expected_count:
+                            missing_count += (expected_count - actual_count)
+                            logger.warning(f"{symbol}: Only {actual_count}/3 funding settlements in last 24h")
+                        
+                        total_checked += 1
+                    
+                except Exception as e:
+                    logger.debug(f"{symbol}: Could not validate funding settlements: {e}")
+            
+            if total_checked > 0 and missing_count > 0:
+                logger.warning(f"Funding rate validation: {missing_count} missing settlements across {total_checked} symbols")
+            elif total_checked > 0:
+                logger.info(f"Funding rate validation passed: {total_checked} symbols have proper 8-hour settlements")
+            
+            return True  # Don't fail on validation warnings
+            
+        except Exception as e:
+            logger.error(f"Funding rate settlement validation error: {e}")
+            return True  # Don't fail entire validation
+    
     def _validate_data(self) -> bool:
         """
         Validate collected data
@@ -361,10 +472,37 @@ class DataService:
         
         logger.info("Starting data validation...")
         
-        # TODO: Implement data validation
-        # This will call check_data_health.py or similar
-        logger.warning("Data validation not yet implemented - skipping")
-        return True
+        try:
+            from postgres_storage import PostgreSQLStorage
+            from postgres_config import PostgresConfig
+            
+            # Initialize PostgreSQL storage
+            db_config = self.config.config.get("database", {})
+            postgres_config = PostgresConfig(
+                host=db_config.get("host", "localhost"),
+                database=db_config.get("database", "qlib_crypto"),
+                user=db_config.get("user", "crypto_user"),
+                password=db_config.get("password", "crypto"),
+                port=db_config.get("port", 5432)
+            )
+            postgres_storage = PostgreSQLStorage.from_config(postgres_config)
+            
+            # Check DB health
+            if postgres_storage.health_check():
+                logger.info("Database health check passed")
+            else:
+                logger.error("Database health check failed")
+                return False
+            
+            # Validate funding rate settlements if enabled
+            if self.config.should_collect_funding_rate:
+                self._validate_funding_rate_settlements(postgres_storage)
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Data validation error: {e}")
+            return False
     
     def _convert_to_qlib(self) -> bool:
         """
@@ -380,10 +518,13 @@ class DataService:
         logger.info("Starting Qlib conversion...")
         
         try:
+            # Get data source from config
+            data_source = self.config.config.get('data_convertor', {}).get('data_source', 'db')
+            
             # Build command
             cmd = [
                 'python', 'scripts/convert_to_qlib.py',
-                '--source', 'db'
+                '--source', data_source
             ]
             
             # Add timeframes
@@ -403,7 +544,20 @@ class DataService:
             
             if result.returncode == 0:
                 logger.info("Qlib conversion completed successfully")
-                logger.debug(f"Output: {result.stdout}")
+                
+                # Verify Qlib data health
+                logger.info("Verifying Qlib data health...")
+                for tf in self.config.target_timeframes:
+                    qlib_dir = f"data/qlib_data/crypto_{tf}"
+                    if os.path.exists(qlib_dir):
+                        logger.info(f"Checking health for {tf} at {qlib_dir}")
+                        check_cmd = [
+                            'python', 'scripts/check_data_health.py',
+                            '--qlib_dir', qlib_dir,
+                            '--freq', tf
+                        ]
+                        subprocess.run(check_cmd, cwd=os.getcwd(), capture_output=True)
+                
                 return True
             else:
                 logger.error(f"Qlib conversion failed: {result.stderr}")

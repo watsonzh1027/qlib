@@ -77,24 +77,24 @@ def main():
     if not raw_freq:
          raw_freq = config.get("data_collection", {}).get("interval", "60min")
 
-    dh_config = {
+    # Try to load handler config from config
+    dh_cfg_from_json = config.get("data_handler_config", {})
+    handler_class = dh_cfg_from_json.get("class", "Alpha158")
+    module_path = dh_cfg_from_json.get("module_path", "qlib.contrib.data.handler")
+    
+    # Merge CLI/derived params into JSON-provided kwargs
+    final_dh_kwargs = dh_cfg_from_json.get("kwargs", {}).copy()
+    
+    # Prioritize derived params for training window stability
+    update_params = {
         "start_time": args.train_start,
         "end_time": args.valid_end,
         "fit_start_time": args.train_start,
         "fit_end_time": args.train_end,
         "instruments": instruments,
-        "infer_processors": [],
-        "learn_processors": [
-            {"class": "DropnaLabel"},
-            {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "label"}}
-        ],
         "freq": raw_freq
     }
-    
-    # Try to load handler config from config
-    dh_cfg_from_json = config.get("data_handler_config", {})
-    handler_class = dh_cfg_from_json.get("class", "Alpha158")
-    module_path = dh_cfg_from_json.get("module_path", "qlib.contrib.data.handler")
+    final_dh_kwargs.update(update_params)
     
     # Construct Dataset
     dataset_config = {
@@ -104,7 +104,7 @@ def main():
             "handler": {
                 "class": handler_class,
                 "module_path": module_path,
-                "kwargs": dh_config
+                "kwargs": final_dh_kwargs
             },
             "segments": {
                 "train": (args.train_start, args.train_end),

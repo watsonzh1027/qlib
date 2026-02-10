@@ -12,19 +12,27 @@
         "normalize_dir": "data/normalize",
         "bin_data_dir": "data/qlib_data/crypto",
         "market_type": "future",
-        "symbols": "config/instruments.json"
+        "symbols": "config/eth_only.json"
     },
     "data_service": {
-        "enabled": false,
-        "update_interval_minutes": 5,
-        "symbols": "config/instruments.json",
-        "base_interval": "1m",
+        "enabled": true,
+        "update_interval_minutes": 1,
+        "symbols": "<data.symbols>",
+        "base_interval": "<data_collection.interval>",
         "target_timeframes": [
             "15min",
             "60min",
             "240min"
         ],
         "enable_funding_rate": "auto",
+        "funding_rate_native_interval": "8h",
+        "funding_collection_times": [
+            "00:05",
+            "08:05",
+            "16:05"
+        ],
+        "funding_collection_window_start": 5,
+        "funding_collection_window_end": 10,
         "enable_validation": true,
         "enable_auto_convert": true,
         "max_retries": 3,
@@ -40,7 +48,7 @@
         "limit": 1000,
         "overlap_minutes": 5,
         "enable_incremental": true,
-        "output": "db"
+        "output": "csv"
     },
     "database": {
         "host": "localhost",
@@ -61,8 +69,8 @@
             "vwap",
             "funding_rate"
         ],
-        "instruments_file": "instruments.txt",
-        "data_source": "db"
+        "instruments_file": "instruments.json",
+        "data_source": "csv"
     },
     "workflow": {
         "start_time": "2024-01-01",
