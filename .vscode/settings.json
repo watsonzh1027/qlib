@@ -21,5 +21,25 @@
             "args": ["--init-file", "${workspaceFolder}/.vscode/terminal-init.sh"]
         }
     },
-    "terminal.integrated.cwd": "${workspaceFolder}"
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "dbcode.connections": [
+        {
+            "connectionId": "sPTABY5aG-DUFGk1ayCGJ",
+            "name": "local-crypto",
+            "driver": "postgres",
+            "color": "#007D5D",
+            "connectionType": "host",
+            "host": "localhost",
+            "port": 5432,
+            "ssl": false,
+            "authMethod": "password",
+            "username": "crypto_user",
+            "password": "",
+            "savePassword": "secretStorage",
+            "database": "qlib_crypto",
+            "readOnly": false,
+            "postConnectionSqlType": "inline",
+            "connectionTimeout": 30
+        }
+    ]
 }

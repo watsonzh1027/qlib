@@ -49,3 +49,4 @@ Created: 2026-02-12 10:05:00
 - 后续建议：
   - 移除遗留的 `start_date`/`end_date` 参数别名并在文档中写明迁移说明（当前已做短期别名兼容）。
   - 在 CI 中加入模块级与集成级测试以覆盖 DB 恢复路径。
+  - Added migration `scripts/migrations/0001_add_created_at_funding_rates.sql` to add `created_at` to `funding_rates` if operators prefer an explicit `created_at` column (safe `IF NOT EXISTS`, and optional backfill commented in file).

@@ -911,10 +911,13 @@ class PostgreSQLStorage:
             raise ValueError("Both start and end times must be provided (start_date/start_time, end_date/end_time)")
 
         try:
+            # funding_rates table may not contain `created_at` in all schema versions.
+            # Select only columns we are certain exist (updated_at is used by upsert),
+            # and build DataFrame accordingly.
             query = text("""
                 SELECT
                     symbol, timestamp, funding_rate, next_funding_time,
-                    mark_price, index_price, created_at, updated_at
+                    mark_price, index_price, updated_at
                 FROM funding_rates
                 WHERE symbol = :symbol
                   AND timestamp >= :start_date
@@ -938,18 +941,21 @@ class PostgreSQLStorage:
                     f"No funding rate data found for {symbol} between {start_date} and {end_date}"
                 )
 
-            # Convert to DataFrame
+            # Convert to DataFrame; note `created_at` may be absent so we only include `updated_at`
             df = pd.DataFrame(rows, columns=[
                 'symbol', 'timestamp', 'funding_rate', 'next_funding_time',
-                'mark_price', 'index_price', 'created_at', 'updated_at'
+                'mark_price', 'index_price', 'updated_at'
             ])
 
             # Ensure proper dtypes
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
             if 'next_funding_time' in df.columns:
                 df['next_funding_time'] = pd.to_datetime(df['next_funding_time'], utc=True)
-            df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
             df['updated_at'] = pd.to_datetime(df['updated_at'], utc=True)
+
+            # For compatibility, provide a `created_at` column by copying `updated_at` if needed
+            if 'created_at' not in df.columns:
+                df['created_at'] = df['updated_at']
 
             logger.info(f"Retrieved {len(df)} funding rate records for {symbol}")
             return df
