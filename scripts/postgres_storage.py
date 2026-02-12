@@ -41,6 +41,8 @@ class OHLCVData(Base):
     trade_count = Column(Integer)
     taker_buy_volume = Column(Numeric(20, 8))
     taker_buy_quote_volume = Column(Numeric(20, 8))
+    funding_rate = Column(Numeric(20, 10))  # Added
+    vwap = Column(Numeric(20, 8))           # Added
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -398,7 +400,10 @@ class PostgreSQLStorage:
                     'quote_volume': row.get('quote_volume'),
                     'trade_count': row.get('trade_count'),
                     'taker_buy_volume': row.get('taker_buy_volume'),
-                    'taker_buy_quote_volume': row.get('taker_buy_quote_volume')
+                    'taker_buy_volume': row.get('taker_buy_volume'),
+                    'taker_buy_quote_volume': row.get('taker_buy_quote_volume'),
+                    'funding_rate': row.get('funding_rate'),
+                    'vwap': row.get('vwap')
                 }
                 records.append(record)
 
@@ -409,11 +414,13 @@ class PostgreSQLStorage:
                     INSERT INTO ohlcv_data (
                         symbol, interval, timestamp, open_price, high_price,
                         low_price, close_price, volume, quote_volume,
-                        trade_count, taker_buy_volume, taker_buy_quote_volume
+                        trade_count, taker_buy_volume, taker_buy_quote_volume,
+                        funding_rate, vwap
                     ) VALUES (
                         :symbol, :interval, :timestamp, :open_price, :high_price,
                         :low_price, :close_price, :volume, :quote_volume,
-                        :trade_count, :taker_buy_volume, :taker_buy_quote_volume
+                        :trade_count, :taker_buy_volume, :taker_buy_quote_volume,
+                        :funding_rate, :vwap
                     )
                     ON CONFLICT (symbol, interval, timestamp) DO NOTHING
                 """)
@@ -461,17 +468,21 @@ class PostgreSQLStorage:
         self,
         symbol: str,
         interval: str,
-        start_date: datetime,
-        end_date: datetime
+        start_date: datetime = None,
+        end_date: datetime = None,
+        start_time: datetime = None,
+        end_time: datetime = None
     ) -> pd.DataFrame:
         """
         Retrieve OHLCV data for specified symbol, interval and time range.
 
+        NOTE: Accepts either `start_date`/`end_date` or `start_time`/`end_time` for compatibility with callers.
+
         Args:
             symbol: Trading pair symbol
             interval: Time interval
-            start_date: Start of time range (UTC)
-            end_date: End of time range (UTC)
+            start_date/start_time: Start of time range (UTC)
+            end_date/end_time: End of time range (UTC)
 
         Returns:
             DataFrame with OHLCV data
@@ -480,12 +491,21 @@ class PostgreSQLStorage:
             DataNotFoundError: If no data exists for the query
             DatabaseError: If query fails
         """
+        # Normalize parameter aliases
+        if start_date is None and start_time is not None:
+            start_date = start_time
+        if end_date is None and end_time is not None:
+            end_date = end_time
+
+        if start_date is None or end_date is None:
+            raise ValueError("Both start and end times must be provided (start_date/start_time, end_date/end_time)")
         try:
             query = text("""
                 SELECT
                     symbol, interval, timestamp, open_price, high_price,
                     low_price, close_price, volume, quote_volume,
                     trade_count, taker_buy_volume, taker_buy_quote_volume,
+                    funding_rate, vwap,
                     created_at, updated_at
                 FROM ohlcv_data
                 WHERE symbol = :symbol
@@ -517,6 +537,7 @@ class PostgreSQLStorage:
                 'symbol', 'interval', 'timestamp', 'open_price', 'high_price',
                 'low_price', 'close_price', 'volume', 'quote_volume',
                 'trade_count', 'taker_buy_volume', 'taker_buy_quote_volume',
+                'funding_rate', 'vwap',
                 'created_at', 'updated_at'
             ])
 
@@ -857,16 +878,21 @@ class PostgreSQLStorage:
     def get_funding_rates(
         self,
         symbol: str,
-        start_date: datetime,
-        end_date: datetime
+        start_date: datetime = None,
+        end_date: datetime = None,
+        start_time: datetime = None,
+        end_time: datetime = None
     ) -> pd.DataFrame:
         """
         Retrieve funding rate data for specified symbol and time range.
 
+        NOTE: This method accepts both `start_date`/`end_date` and `start_time`/`end_time`
+        as argument names for backward compatibility with different callers.
+
         Args:
             symbol: Trading pair symbol
-            start_date: Start of time range (UTC)
-            end_date: End of time range (UTC)
+            start_date / start_time: Start of time range (UTC)
+            end_date / end_time: End of time range (UTC)
 
         Returns:
             DataFrame with funding rate data
@@ -875,6 +901,15 @@ class PostgreSQLStorage:
             DataNotFoundError: If no data exists for the query
             DatabaseError: If query fails
         """
+        # Accept either naming convention
+        if start_date is None and start_time is not None:
+            start_date = start_time
+        if end_date is None and end_time is not None:
+            end_date = end_time
+
+        if start_date is None or end_date is None:
+            raise ValueError("Both start and end times must be provided (start_date/start_time, end_date/end_time)")
+
         try:
             query = text("""
                 SELECT

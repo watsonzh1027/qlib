@@ -12,7 +12,7 @@
         "normalize_dir": "data/normalize",
         "bin_data_dir": "data/qlib_data/crypto",
         "market_type": "future",
-        "symbols": "config/eth_only.json"
+        "symbols": "config/instruments.json"
     },
     "data_service": {
         "enabled": true,
@@ -48,7 +48,13 @@
         "limit": 1000,
         "overlap_minutes": 5,
         "enable_incremental": true,
-        "output": "csv"
+        "output": "csv",
+        "max_gap_backfill_days": 30,
+        "enable_long_backfill": false,
+        "backfill_chunk_days": 90,
+        "backfill_state_dir": "data/backfill_state",
+        "backfill_snapshot_dir": "data/backfill_snapshots",
+        "enable_backfill_snapshot": false
     },
     "database": {
         "host": "localhost",
@@ -59,6 +65,7 @@
         "use_db": true
     },
     "data_convertor": {
+        "provider_uri": "<data.bin_data_dir>",
         "date_field_name": "timestamp",
         "include_fields": [
             "open",
@@ -69,7 +76,7 @@
             "vwap",
             "funding_rate"
         ],
-        "instruments_file": "instruments.json",
+        "instruments_file": "<data.symbols>",
         "data_source": "csv"
     },
     "workflow": {

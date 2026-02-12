@@ -71,6 +71,14 @@ class DataServiceConfig:
         """Reload configuration from file"""
         self.config = self._load_config()
         logger.info("Configuration reloaded")
+
+    def _resolve_placeholder(self, value: str) -> str:
+        """Resolve known placeholder values used in workflow.json."""
+        if value == "<data_collection.interval>":
+            return self.config.get('data_collection', {}).get('interval', '1m')
+        if value == "<data.symbols>":
+            return self.config.get('data', {}).get('symbols', 'config/instruments.json')
+        return value
     
     @property
     def enabled(self) -> bool:
@@ -85,12 +93,18 @@ class DataServiceConfig:
     @property
     def symbols_file(self) -> str:
         """Get symbols configuration file path"""
-        return self.config.get('data_service', {}).get('symbols', 'config/instruments.json')
+        raw = self.config.get('data_service', {}).get('symbols', 'config/instruments.json')
+        if isinstance(raw, str):
+            return self._resolve_placeholder(raw)
+        return raw
     
     @property
     def base_interval(self) -> str:
         """Get base collection interval"""
-        return self.config.get('data_service', {}).get('base_interval', '1m')
+        raw = self.config.get('data_service', {}).get('base_interval', '1m')
+        if isinstance(raw, str):
+            return self._resolve_placeholder(raw)
+        return raw
     
     @property
     def target_timeframes(self) -> List[str]:

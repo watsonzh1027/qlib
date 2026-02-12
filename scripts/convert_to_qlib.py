@@ -141,18 +141,28 @@ class PostgreSQLStorage:
 
     def get_funding_rates(self, symbol: str,
                          start_date: Optional[str] = None,
-                         end_date: Optional[str] = None) -> pd.DataFrame:
+                         end_date: Optional[str] = None,
+                         start_time: Optional[str] = None,
+                         end_time: Optional[str] = None) -> pd.DataFrame:
         """
         Retrieve funding rate data for a specific symbol.
 
+        Accepts either `start_date`/`end_date` or `start_time`/`end_time` for compatibility with various callers.
+
         Args:
             symbol: Trading pair symbol (e.g., 'BTC/USDT', 'ETHUSDT')
-            start_date: Start date in ISO format (optional)
-            end_date: End date in ISO format (optional)
+            start_date/start_time: Start date/time in ISO format (optional)
+            end_date/end_time: End date/time in ISO format (optional)
 
         Returns:
             DataFrame with funding rate data
         """
+        # Normalize aliases
+        if start_date is None and start_time is not None:
+            start_date = start_time
+        if end_date is None and end_time is not None:
+            end_date = end_time
+
         if not self.connection:
             raise ConnectionError("Database connection not established")
 
@@ -776,8 +786,11 @@ def convert_to_qlib(source: str = None, freq: str = None):
         raise ValueError(f"Invalid data source: {source}")
     
     input_dir = data_config.get("csv_data_dir", "data/klines")
-    # Base output dir
-    base_output_dir = os.path.abspath(data_config.get("bin_data_dir", "data/qlib_data/crypto"))
+    # Base output dir (allow data_convertor.provider_uri override)
+    provider_uri = data_convertor.get("provider_uri")
+    if provider_uri == "<data.bin_data_dir>":
+        provider_uri = data_config.get("bin_data_dir")
+    base_output_dir = os.path.abspath(provider_uri or data_config.get("bin_data_dir", "data/qlib_data/crypto"))
     
     # Get convertor parameters
     date_field_name = data_convertor.get("date_field_name", "timestamp")
@@ -824,6 +837,7 @@ def convert_to_qlib(source: str = None, freq: str = None):
     print(f"Output Directory: {output_dir}")
     
     all_data = {}  # Dictionary to hold all symbol data in memory
+    mode = "all"
     
     # Load data from CSV if source includes csv
     if source in ["csv", "both"]:
@@ -834,77 +848,87 @@ def convert_to_qlib(source: str = None, freq: str = None):
         symbol_groups = {}
         for csv_file in csv_files:
             # Determine symbol/interval/market_type from path
-            # Expected structure: root/ETH_USDT/4h/future/ETH_USDT.csv
+            # Supported structures:
+            # 1) root/ETH_USDT/4h/future/ETH_USDT.csv
+            # 2) root/ETHUSDT/ETHUSDT_1m.csv
             rel_path = os.path.relpath(csv_file, input_dir)
             parts = rel_path.split(os.sep)
             if len(parts) >= 4:
                 symbol = parts[0]
-                # For Qlib symbol, we now just use "ETH_USDT" because we are in a freq-specific dataset
-                qlib_symbol = symbol.upper() # Simple symbol
-                
-                if qlib_symbol not in symbol_groups:
-                    symbol_groups[qlib_symbol] = []
-                
-                df = pd.read_csv(csv_file)
-                # Resample to target frequency if needed
-                if target_freq != "1min":
-                    df[date_field_name] = pd.to_datetime(df[date_field_name])
-                    df = df.set_index(date_field_name)
-                    # Resample OHLCV data appropriately
-                    agg_dict = {
-                        'open': 'first',
-                        'high': 'max', 
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }
-                    
-                    # Handle funding_rate separately with forward-fill
-                    # Funding rates settle every 8 hours (not continuous like OHLCV)
-                    # We need to forward-fill the 8-hour values to finer timeframes
-                    funding_rate_col = None
-                    if 'funding_rate' in df.columns:
-                        # Save funding_rate column before resampling
-                        # Keep the index for proper resampling
-                        funding_rate_col = df[['funding_rate']].copy()
-                        # Don't include in agg_dict - handle separately
-                        df = df.drop(columns=['funding_rate'])
-                    
-                    if 'vwap' in df.columns:
-                        # Use weighted average for VWAP if volume exists, else mean
-                        if 'volume' in df.columns:
-                            # We need a lambda that can access the volume of the specific group
-                            # Standard groupby agg doesn't easily support multi-column aggregation functions
-                            # So we do a custom apply or simplified mean if too complex for this script config
-                            # For robustness in this script, let's use a custom apply or just mean.
-                            # Standard Pandas agg with lambda only gets the series of the column.
-                            # So we cannot access weights. 
-                            # Workaround: Calculate (vwap * volume) -> cum_amount, resample sum, then divide by vol sum.
-                            df['amount'] = df['vwap'] * df['volume']
-                            agg_dict['amount'] = 'sum'
-                            # We will recalculate vwap after resampling
-                        else:
-                            agg_dict['vwap'] = 'mean'
+            elif len(parts) >= 2:
+                symbol = parts[0]
+            else:
+                continue
 
-                    resampled = df.resample(target_freq).agg(agg_dict).dropna().reset_index()
-                    
-                    # Post-processing to recover VWAP if we used amount
-                    if 'amount' in resampled.columns and 'volume' in resampled.columns:
-                         resampled['vwap'] = resampled['amount'] / resampled['volume']
-                         resampled.drop(columns=['amount'], inplace=True)
-                    
-                    # Forward-fill funding_rate from 8-hour native frequency
-                    # Funding rates don't "aggregate" - they propagate until next settlement
-                    if funding_rate_col is not None:
-                        # Resample funding_rate using forward-fill method
-                        funding_resampled = funding_rate_col.resample(target_freq).ffill()
-                        # Merge back with OHLCV data
-                        resampled = resampled.set_index(date_field_name)
-                        resampled = resampled.join(funding_resampled, how='left')
-                        resampled = resampled.reset_index()
-                         
-                    df = resampled
-                    print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
+            # For Qlib symbol, we now just use "ETH_USDT" because we are in a freq-specific dataset
+            qlib_symbol = symbol.upper()  # Simple symbol
+
+            if qlib_symbol not in symbol_groups:
+                symbol_groups[qlib_symbol] = []
+
+            df = pd.read_csv(csv_file)
+            # Resample to target frequency if needed
+            if target_freq != "1min":
+                df[date_field_name] = pd.to_datetime(df[date_field_name])
+                df = df.set_index(date_field_name)
+                # Resample OHLCV data appropriately
+                agg_dict = {
+                    'open': 'first',
+                    'high': 'max', 
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }
+                
+                # Handle funding_rate separately with forward-fill
+                # Funding rates settle every 8 hours (not continuous like OHLCV)
+                # We need to forward-fill the 8-hour values to finer timeframes
+                funding_rate_col = None
+                if 'funding_rate' in df.columns:
+                    # Save funding_rate column before resampling
+                    # Keep the index for proper resampling
+                    funding_rate_col = df[['funding_rate']].copy()
+                    # Drop duplicate timestamps to avoid resample errors
+                    funding_rate_col = funding_rate_col[~funding_rate_col.index.duplicated(keep='last')]
+                    funding_rate_col = funding_rate_col.sort_index()
+                    # Don't include in agg_dict - handle separately
+                    df = df.drop(columns=['funding_rate'])
+                
+                if 'vwap' in df.columns:
+                    # Use weighted average for VWAP if volume exists, else mean
+                    if 'volume' in df.columns:
+                        # We need a lambda that can access the volume of the specific group
+                        # Standard groupby agg doesn't easily support multi-column aggregation functions
+                        # So we do a custom apply or simplified mean if too complex for this script config
+                        # For robustness in this script, let's use a custom apply or just mean.
+                        # Standard Pandas agg with lambda only gets the series of the column.
+                        # So we cannot access weights. 
+                        # Workaround: Calculate (vwap * volume) -> cum_amount, resample sum, then divide by vol sum.
+                        df['amount'] = df['vwap'] * df['volume']
+                        agg_dict['amount'] = 'sum'
+                        # We will recalculate vwap after resampling
+                    else:
+                        agg_dict['vwap'] = 'mean'
+
+                resampled = df.resample(target_freq).agg(agg_dict).dropna().reset_index()
+                
+                # Post-processing to recover VWAP if we used amount
+                if 'amount' in resampled.columns and 'volume' in resampled.columns:
+                    resampled['vwap'] = resampled['amount'] / resampled['volume']
+                    resampled.drop(columns=['amount'], inplace=True)
+                
+                # Forward-fill funding_rate from 8-hour native frequency
+                # Funding rates don't "aggregate" - they propagate until next settlement
+                if funding_rate_col is not None:
+                    # Resample funding_rate using forward-fill method
+                    funding_resampled = funding_rate_col.resample(target_freq).ffill()
+                    # Merge back with OHLCV data
+                    resampled = resampled.set_index(date_field_name)
+                    resampled = resampled.join(funding_resampled, how='left')
+                    resampled = resampled.reset_index()
+                     
+                df = resampled
+                print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
                 
                 symbol_groups[qlib_symbol].append(df)
 
@@ -990,14 +1014,14 @@ def convert_to_qlib(source: str = None, freq: str = None):
             
             for symbol in symbols:
                 # Pass start_date to incremental fetch
-                df = db_storage.get_kline_data(symbol, source_interval, start_date=start_time_db)
+                df = db_storage.get_kline_data(symbol, source_interval, start_time=start_time_db)
                 if not df.empty:
                     # Ensure timestamp is datetime
                     df[date_field_name] = pd.to_datetime(df[date_field_name])
                     
                     # Merge funding rates if available
                     try:
-                        fr_df = db_storage.get_funding_rates(symbol, start_date=start_time_db)
+                        fr_df = db_storage.get_funding_rates(symbol, start_time=start_time_db)
                         if not fr_df.empty:
                             logger.info(f"{symbol}: Merging {len(fr_df)} funding rate records with OHLCV data")
                             # Use merge_asof to align funding rates (8-hour) with OHLCV timestamps
