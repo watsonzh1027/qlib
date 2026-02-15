@@ -4,6 +4,8 @@ import pandas as pd
 import tempfile
 import numpy as np
 import time
+import re
+import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from functools import partial
@@ -839,6 +841,52 @@ def convert_to_qlib(source: str = None, freq: str = None):
     all_data = {}  # Dictionary to hold all symbol data in memory
     mode = "all"
     
+    def _symbol_key(symbol: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", str(symbol).upper())
+
+    expected_symbols = []
+    instruments_file = data_convertor.get("instruments_file") or data_config.get("symbols")
+    if instruments_file == "<data.symbols>":
+        instruments_file = data_config.get("symbols")
+    if instruments_file:
+        try:
+            if not os.path.isabs(instruments_file):
+                instruments_file = os.path.join(str(project_root), instruments_file)
+            with open(instruments_file, "r") as f:
+                inst_data = json.load(f)
+                expected_symbols = inst_data.get("symbols", [])
+        except Exception as e:
+            logger.warning(f"Failed to load instruments file {instruments_file}: {e}")
+
+    def _load_existing_instrument_ends(target_dir: str) -> Dict[str, pd.Timestamp]:
+        inst_path = Path(target_dir) / "instruments" / "all.txt"
+        if not inst_path.exists():
+            return {}
+        try:
+            df_inst = pd.read_csv(inst_path, sep='\t', header=None, names=['symbol', 'start', 'end'])
+            ends = {}
+            for _, row in df_inst.iterrows():
+                symbol = str(row['symbol']).upper()
+                try:
+                    ends[symbol] = pd.Timestamp(row['end'])
+                except Exception:
+                    continue
+            return ends
+        except Exception as e:
+            logger.warning(f"Failed to load existing instruments from {inst_path}: {e}")
+            return {}
+
+    existing_end_map = _load_existing_instrument_ends(output_dir)
+
+    expected_map = {}
+    expected_keys = set()
+    for sym in expected_symbols:
+        key = _symbol_key(sym)
+        if not key:
+            continue
+        expected_keys.add(key)
+        expected_map.setdefault(key, sym)
+
     # Load data from CSV if source includes csv
     if source in ["csv", "both"]:
         # Recursively find all CSV files in the hierarchical structure
@@ -846,6 +894,7 @@ def convert_to_qlib(source: str = None, freq: str = None):
         csv_files = glob.glob(os.path.join(input_dir, "**/*.csv"), recursive=True)
         
         symbol_groups = {}
+        found_keys = set()
         for csv_file in csv_files:
             # Determine symbol/interval/market_type from path
             # Supported structures:
@@ -859,6 +908,12 @@ def convert_to_qlib(source: str = None, freq: str = None):
                 symbol = parts[0]
             else:
                 continue
+
+            symbol_key = _symbol_key(symbol)
+            if expected_keys and symbol_key not in expected_keys:
+                continue
+            if symbol_key:
+                found_keys.add(symbol_key)
 
             # For Qlib symbol, we now just use "ETH_USDT" because we are in a freq-specific dataset
             qlib_symbol = symbol.upper()  # Simple symbol
@@ -897,16 +952,9 @@ def convert_to_qlib(source: str = None, freq: str = None):
                 if 'vwap' in df.columns:
                     # Use weighted average for VWAP if volume exists, else mean
                     if 'volume' in df.columns:
-                        # We need a lambda that can access the volume of the specific group
-                        # Standard groupby agg doesn't easily support multi-column aggregation functions
-                        # So we do a custom apply or simplified mean if too complex for this script config
-                        # For robustness in this script, let's use a custom apply or just mean.
-                        # Standard Pandas agg with lambda only gets the series of the column.
-                        # So we cannot access weights. 
                         # Workaround: Calculate (vwap * volume) -> cum_amount, resample sum, then divide by vol sum.
                         df['amount'] = df['vwap'] * df['volume']
                         agg_dict['amount'] = 'sum'
-                        # We will recalculate vwap after resampling
                     else:
                         agg_dict['vwap'] = 'mean'
 
@@ -929,8 +977,11 @@ def convert_to_qlib(source: str = None, freq: str = None):
                      
                 df = resampled
                 print(f"Resampled {qlib_symbol} to {target_freq}: {len(df)} rows")
-                
-                symbol_groups[qlib_symbol].append(df)
+
+            symbol_groups[qlib_symbol].append(df)
+
+        if existing_end_map:
+            mode = "update"
 
         for qlib_symbol, dfs in symbol_groups.items():
             if dfs:
@@ -938,6 +989,17 @@ def convert_to_qlib(source: str = None, freq: str = None):
                 merged_df = pd.concat(dfs).drop_duplicates(subset=[date_field_name]).sort_values(date_field_name)
                 # Convert timestamp to datetime string for Qlib compatibility
                 merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name])
+                if existing_end_map:
+                    existing_end = existing_end_map.get(qlib_symbol.upper())
+                    if existing_end is not None:
+                        existing_end = pd.Timestamp(existing_end)
+                        merged_df[date_field_name] = pd.to_datetime(merged_df[date_field_name]).dt.tz_localize(None)
+                        merged_df = merged_df[merged_df[date_field_name] > existing_end]
+                        if merged_df.empty:
+                            logger.info(
+                                f"Skipping {qlib_symbol} for {target_freq}: no new resampled rows beyond {existing_end}"
+                            )
+                            continue
                 if validate_data_integrity(merged_df, target_freq, date_field=date_field_name):
                     all_data[qlib_symbol] = merged_df  # Store in memory
                     # Log before convert information
@@ -946,7 +1008,13 @@ def convert_to_qlib(source: str = None, freq: str = None):
                     total_records = len(merged_df)
                     logger.info(f"Before convert - Symbol: {qlib_symbol}, Start: {start_time}, End: {end_time}, Records: {total_records}")
                 else:
-                    print(f"Data integrity validation failed for {qlib_symbol}")
+                    raise RuntimeError(f"Data integrity validation failed for {qlib_symbol}")
+
+        if expected_keys:
+            missing_keys = expected_keys - found_keys
+            if missing_keys:
+                missing_symbols = [expected_map.get(k, k) for k in sorted(missing_keys)]
+                raise RuntimeError(f"Missing CSV data for expected symbols: {missing_symbols}")
     
     # Load data from database if source includes db
     if source in ["db", "both"]:
@@ -1103,7 +1171,7 @@ def convert_to_qlib(source: str = None, freq: str = None):
     
     # Now process all data at once
     if not all_data:
-        print(f"No valid data found for {target_freq}.")
+        logger.info(f"No new data found for {target_freq}; skipping conversion.")
         return
     
     # Create temporary directory for CSV files

@@ -147,6 +147,11 @@ class DataServiceConfig:
     def enable_auto_convert(self) -> bool:
         """Check if automatic conversion is enabled"""
         return self.config.get('data_service', {}).get('enable_auto_convert', True)
+
+    @property
+    def require_complete_data_for_conversion(self) -> bool:
+        """Check if conversion should wait for complete data coverage"""
+        return self.config.get('data_service', {}).get('require_complete_data_for_conversion', True)
     
     @property
     def max_retries(self) -> int:
@@ -176,6 +181,7 @@ class DataService:
         self.config = config
         self.running = False
         self.last_update_time: Optional[datetime] = None
+        self.last_collection_end_time: Optional[datetime] = None
         self.status = {
             'state': 'stopped',
             'last_update': None,
@@ -279,27 +285,10 @@ class DataService:
         
         try:
             # Calculate time range (last update to now)
-            end_time = datetime.now()
-            
-            # Try to get start_time from config (data_collection or workflow)
-            dc_config = self.config.config.get("data_collection", {})
-            wf_config = self.config.config.get("workflow", {})
-            
-            # Prioritize data_collection.start_time as it's intended for downloading
-            config_start = dc_config.get("start_time") or wf_config.get("start_time")
-            
-            logger.info(f"Config start_time found: {config_start}")
-            
-            if config_start:
-                try:
-                    # Pass the date string directly or parse to ensure validity
-                    start_time_to_pass = pd.to_datetime(config_start).strftime('%Y-%m-%dT%H:%M:%SZ')
-                except Exception as e:
-                    logger.warning(f"Failed to parse config start_time '{config_start}': {e}. Falling back to 365 days.")
-                    start_time_to_pass = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            else:
-                logger.info("No start_time found in config. Falling back to 365 days.")
-                start_time_to_pass = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_time = datetime.now(timezone.utc)
+            self.last_collection_end_time = end_time
+
+            start_time_to_pass = self._resolve_collection_start_time().strftime('%Y-%m-%dT%H:%M:%SZ')
             
             
             # Get output format from config
@@ -339,6 +328,159 @@ class DataService:
             return False
         except Exception as e:
             logger.error(f"OHLCV data collection error: {e}")
+            return False
+
+    def _resolve_collection_start_time(self) -> pd.Timestamp:
+        """Resolve collection start time from config with fallback."""
+        dc_config = self.config.config.get("data_collection", {})
+        wf_config = self.config.config.get("workflow", {})
+        config_start = dc_config.get("start_time") or wf_config.get("start_time")
+
+        logger.info(f"Config start_time found: {config_start}")
+
+        if config_start:
+            try:
+                return pd.Timestamp(config_start, tz='UTC')
+            except Exception as e:
+                logger.warning(
+                    f"Failed to parse config start_time '{config_start}': {e}. Falling back to 365 days."
+                )
+        else:
+            logger.info("No start_time found in config. Falling back to 365 days.")
+
+        return pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365)
+
+    def _load_okx_helpers(self):
+        """Load helper functions from okx_data_collector with a fallback path."""
+        try:
+            from okx_data_collector import (
+                load_symbols,
+                get_first_timestamp_from_csv,
+                get_last_timestamp_from_csv,
+                get_first_timestamp_from_db,
+                get_last_timestamp_from_db,
+                get_interval_minutes,
+                _earliest_manager,
+            )
+        except ModuleNotFoundError:
+            scripts_dir = Path(__file__).resolve().parent
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from okx_data_collector import (
+                load_symbols,
+                get_first_timestamp_from_csv,
+                get_last_timestamp_from_csv,
+                get_first_timestamp_from_db,
+                get_last_timestamp_from_db,
+                get_interval_minutes,
+                _earliest_manager,
+            )
+
+        return (
+            load_symbols,
+            get_first_timestamp_from_csv,
+            get_last_timestamp_from_csv,
+            get_first_timestamp_from_db,
+            get_last_timestamp_from_db,
+            get_interval_minutes,
+            _earliest_manager,
+        )
+
+    def _is_data_complete_for_conversion(self) -> bool:
+        """Check if all symbols have data covering the configured start/end window."""
+        try:
+            (
+                load_symbols,
+                get_first_timestamp_from_csv,
+                get_last_timestamp_from_csv,
+                get_first_timestamp_from_db,
+                get_last_timestamp_from_db,
+                get_interval_minutes,
+                _earliest_manager,
+            ) = self._load_okx_helpers()
+            from postgres_storage import PostgreSQLStorage
+            from postgres_config import PostgresConfig
+
+            symbols = load_symbols(self.config.symbols_file)
+            if not symbols:
+                logger.warning("No symbols loaded for conversion completeness check")
+                return False
+
+            output_format = self.config.config.get('data_collection', {}).get('output', 'db')
+            output_format = output_format.lower() if isinstance(output_format, str) else output_format
+            if output_format == "db":
+                output_format = "postgres"
+            interval = self.config.base_interval
+            interval_minutes = get_interval_minutes(interval)
+            start_tolerance = pd.Timedelta(minutes=max(1, interval_minutes))
+            end_tolerance = pd.Timedelta(0)
+
+            expected_start = self._resolve_collection_start_time()
+            end_time = self.last_collection_end_time or datetime.now(timezone.utc)
+            expected_end = pd.Timestamp(end_time)
+            if expected_end.tzinfo is None:
+                expected_end = expected_end.tz_localize('UTC')
+            else:
+                expected_end = expected_end.tz_convert('UTC')
+
+            postgres_storage = None
+            if output_format == "postgres":
+                db_config = self.config.config.get("database", {})
+                postgres_config = PostgresConfig(
+                    host=db_config.get("host", "localhost"),
+                    database=db_config.get("database", "qlib_crypto"),
+                    user=db_config.get("user", "crypto_user"),
+                    password=db_config.get("password", "crypto"),
+                    port=db_config.get("port", 5432)
+                )
+                postgres_storage = PostgreSQLStorage.from_config(postgres_config)
+            else:
+                base_dir = self.config.config.get("data", {}).get("csv_data_dir", "data/klines")
+
+            incomplete = []
+
+            for symbol in symbols:
+                if output_format == "postgres" and postgres_storage is not None:
+                    first_ts = get_first_timestamp_from_db(symbol, interval, postgres_storage)
+                    last_ts = get_last_timestamp_from_db(symbol, interval, postgres_storage)
+                else:
+                    first_ts = get_first_timestamp_from_csv(symbol, base_dir=base_dir, interval=interval)
+                    last_ts = get_last_timestamp_from_csv(symbol, base_dir=base_dir, interval=interval)
+
+                if first_ts is None or last_ts is None:
+                    incomplete.append(f"{symbol}: missing timestamps")
+                    continue
+
+                first_ts = pd.Timestamp(first_ts, tz='UTC') if first_ts.tzinfo is None else pd.Timestamp(first_ts).tz_convert('UTC')
+                last_ts = pd.Timestamp(last_ts, tz='UTC') if last_ts.tzinfo is None else pd.Timestamp(last_ts).tz_convert('UTC')
+
+                earliest_floor = _earliest_manager.get_earliest(symbol, interval)
+                symbol_start = expected_start
+                if earliest_floor and earliest_floor > symbol_start:
+                    symbol_start = earliest_floor
+
+                if first_ts > symbol_start + start_tolerance:
+                    incomplete.append(
+                        f"{symbol}: starts at {first_ts.isoformat()} (expected <= {(symbol_start + start_tolerance).isoformat()})"
+                    )
+                    continue
+
+                if last_ts < expected_end - end_tolerance:
+                    incomplete.append(
+                        f"{symbol}: ends at {last_ts.isoformat()} (expected >= {(expected_end - end_tolerance).isoformat()})"
+                    )
+
+            if incomplete:
+                logger.warning(
+                    "Data incomplete for conversion; missing coverage for %d symbols: %s",
+                    len(incomplete),
+                    "; ".join(incomplete)
+                )
+                return False
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed conversion completeness check: {e}")
             return False
     
     def _collect_funding_rates(self) -> bool:
@@ -528,6 +670,11 @@ class DataService:
         if not self.config.enable_auto_convert:
             logger.info("Auto-conversion disabled, skipping")
             return True
+
+        if self.config.require_complete_data_for_conversion:
+            if not self._is_data_complete_for_conversion():
+                logger.warning("Skipping Qlib conversion: data collection incomplete")
+                return True
         
         logger.info("Starting Qlib conversion...")
         
@@ -667,6 +814,11 @@ class DataService:
         logger.info(f"Update interval: {self.config.update_interval_minutes} minutes")
         logger.info(f"Market type: {self.config.market_type}")
         logger.info(f"Funding rate collection: {self.config.should_collect_funding_rate}")
+        integrity_mode = self.config.config.get("data_collection", {}).get("integrity_mode", "strict")
+        enable_resume = self.config.config.get("data_collection", {}).get("enable_resume", True)
+        collection_state_dir = self.config.config.get("data_collection", {}).get("collection_state_dir", "data/collection_state")
+        logger.info(f"Integrity mode: {integrity_mode}")
+        logger.info(f"Collection resume: {enable_resume} (state dir: {collection_state_dir})")
         
         # Save PID
         self._save_pid()

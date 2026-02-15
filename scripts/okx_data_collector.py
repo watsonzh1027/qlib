@@ -68,6 +68,10 @@ class BackfillCriticalError(RuntimeError):
     """Raised when backfill fails repeatedly and requires manual intervention."""
 
 
+class IntegrityError(RuntimeError):
+    """Raised when strict integrity validation fails."""
+
+
 def _save_backfill_failure_state(symbol: str, info: dict):
     """Persist backfill failure details to data/backfill_state/<symbol>.json"""
     try:
@@ -85,6 +89,41 @@ def _save_backfill_failure_state(symbol: str, info: dict):
         p.write_text(json.dumps(state, indent=2))
     except Exception as e:
         logger.warning(f"Failed to persist backfill failure state for {symbol}: {e}")
+
+
+def _collection_state_dir():
+    from pathlib import Path as _Path
+    return _Path(config.get("data_collection", {}).get("collection_state_dir", "data/collection_state"))
+
+
+def _collection_state_path(symbol: str, timeframe: str) -> "Path":
+    from pathlib import Path as _Path
+    sdir = _collection_state_dir()
+    sdir.mkdir(parents=True, exist_ok=True)
+    safe = symbol.replace('/', '_').replace(':', '_')
+    return _Path(sdir).joinpath(f"{safe}_{timeframe}.json")
+
+
+def _load_collection_state(symbol: str, timeframe: str) -> dict:
+    p = _collection_state_path(symbol, timeframe)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_collection_state(symbol: str, timeframe: str, data: dict) -> None:
+    p = _collection_state_path(symbol, timeframe)
+    data["updated_at"] = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    p.write_text(json.dumps(data, indent=2))
+
+
+def _update_collection_state(symbol: str, timeframe: str, **kwargs) -> None:
+    state = _load_collection_state(symbol, timeframe)
+    state.update(kwargs)
+    _save_collection_state(symbol, timeframe, state)
 
 
 def _handle_interrupt(signum, frame):
@@ -1003,6 +1042,67 @@ def validate_data_continuity(df: pd.DataFrame, interval_minutes: int = 1) -> boo
         logger.error(f"Error validating data continuity: {e}")
         return False
 
+
+def analyze_data_continuity(df: pd.DataFrame, interval_minutes: int = 1) -> dict:
+    """Analyze continuity issues and return counts for gaps/duplicates/coverage."""
+    result = {
+        "valid": False,
+        "duplicate_count": 0,
+        "gap_count": 0,
+        "coverage_ratio": 0.0,
+        "expected_points": 0,
+        "actual_points": 0,
+    }
+
+    if df is None or df.empty or 'timestamp' not in df.columns:
+        return result
+
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+    timestamps = df['timestamp'].dropna().sort_values()
+    if timestamps.empty:
+        return result
+
+    # Prefer explicit interval if provided
+    if 'interval' in df.columns:
+        try:
+            interval_candidate = str(df['interval'].dropna().iloc[0])
+            interval_minutes = get_interval_minutes(interval_candidate)
+        except Exception:
+            pass
+
+    if len(timestamps) < 2:
+        result.update({
+            "valid": True,
+            "duplicate_count": 0,
+            "gap_count": 0,
+            "coverage_ratio": 1.0,
+            "expected_points": len(timestamps),
+            "actual_points": len(timestamps),
+        })
+        return result
+
+    diffs = timestamps.diff().dropna()
+    expected_interval = pd.Timedelta(minutes=interval_minutes)
+    gap_count = int((diffs > expected_interval * 2).sum())
+    duplicate_count = int(timestamps.duplicated().sum())
+
+    total_expected_points = int((timestamps.max() - timestamps.min()).total_seconds() / (interval_minutes * 60)) + 1
+    actual_points = len(timestamps)
+    coverage_ratio = actual_points / total_expected_points if total_expected_points > 0 else 1.0
+
+    valid = gap_count == 0 and duplicate_count == 0 and coverage_ratio >= 0.8
+
+    result.update({
+        "valid": valid,
+        "duplicate_count": duplicate_count,
+        "gap_count": gap_count,
+        "coverage_ratio": coverage_ratio,
+        "expected_points": total_expected_points,
+        "actual_points": actual_points,
+    })
+    return result
+
 def get_missing_ranges(df: pd.DataFrame, interval_minutes: int) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """
     Get missing time ranges based on expected interval.
@@ -1164,7 +1264,21 @@ def backfill_missing_ranges(
         p = _state_path(sym)
         if p.exists():
             try:
-                return json.loads(p.read_text())
+                state = json.loads(p.read_text())
+                done = state.get('done_chunks', [])
+                if isinstance(done, list):
+                    # Deduplicate while preserving order
+                    seen = set()
+                    deduped = []
+                    for item in done:
+                        if item in seen:
+                            continue
+                        seen.add(item)
+                        deduped.append(item)
+                    state['done_chunks'] = deduped
+                    if state.get('last_done') not in deduped:
+                        state['last_done'] = deduped[-1] if deduped else None
+                return state
             except Exception:
                 return {}
         return {}
@@ -1234,6 +1348,7 @@ def backfill_missing_ranges(
             done = state.get('done_chunks', [])
             if ckey in done:
                 logger.debug(f"{symbol}: Chunk {ckey} already done, attempting to load from storage")
+                loaded_rows = 0
                 # Try to load existing saved rows for this chunk from CSV or DB so callers get the backfilled data
                 try:
                     # Preferred: if configured to use Postgres, try loading from DB
@@ -1246,6 +1361,7 @@ def backfill_missing_ranges(
                                 end_time=cend.to_pydatetime()
                             )
                             if df_chunk is not None and not df_chunk.empty:
+                                loaded_rows += len(df_chunk)
                                 for _, row in df_chunk.iterrows():
                                     collected.append({
                                         'symbol': row.get('symbol', symbol),
@@ -1268,6 +1384,7 @@ def backfill_missing_ranges(
                         loaded_df['timestamp'] = pd.to_datetime(loaded_df['timestamp'], utc=True, errors='coerce')
                         mask = (loaded_df['timestamp'] >= cstart) & (loaded_df['timestamp'] <= cend)
                         subset = loaded_df.loc[mask]
+                        loaded_rows += len(subset)
                         for _, row in subset.iterrows():
                             collected.append({
                                 'symbol': symbol,
@@ -1283,7 +1400,18 @@ def backfill_missing_ranges(
                         continue
                 except Exception as e:
                     logger.warning(f"{symbol}: Failed to load previously completed chunk {ckey}: {e}")
-                continue
+                if loaded_rows > 0:
+                    continue
+
+                logger.warning(f"{symbol}: Completed chunk {ckey} had 0 rows; will retry fetch")
+                try:
+                    state = _load_state(symbol)
+                    done = state.get('done_chunks', [])
+                    state['done_chunks'] = [c for c in done if c != ckey]
+                    state['last_done'] = state['done_chunks'][-1] if state['done_chunks'] else None
+                    _save_state(symbol, state)
+                except Exception as state_error:
+                    logger.warning(f"{symbol}: Failed to reset chunk {ckey} state: {state_error}")
 
             logger.info(f"{symbol}: Backfilling chunk {cstart} -> {cend}")
             try:
@@ -1331,8 +1459,11 @@ def backfill_missing_ranges(
                 # mark chunk done
                 state = _load_state(symbol)
                 done = state.setdefault('done_chunks', [])
-                done.append(ckey)
+                if ckey not in done:
+                    done.append(ckey)
                 state['last_done'] = ckey
+                chunk_rows = state.setdefault('chunk_rows', {})
+                chunk_rows[ckey] = len(candles)
                 _save_state(symbol, state)
 
                 logger.info(f"{symbol}: Completed backfill chunk {cstart} -> {cend} ({len(candles)} candles)")
@@ -2480,6 +2611,11 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
     enable_incremental = config.get("data_collection", {}).get("enable_incremental", True)
     logger.debug(f"DEBUG: enable_incremental = {enable_incremental}")  # Debug print
 
+    integrity_mode = str(config.get("data_collection", {}).get("integrity_mode", "strict")).lower()
+    enable_resume = bool(config.get("data_collection", {}).get("enable_resume", True))
+    max_renew_attempts = int(config.get("data_collection", {}).get("max_renew_attempts", 1))
+    enable_gap_backfill = bool(config.get("data_collection", {}).get("enable_gap_backfill", True))
+
     # Initialize CCXT exchange once for all symbols
     exchange = ccxt.okx({
         'options': {
@@ -2497,9 +2633,19 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             break
         try:
             if _shutdown_requested: break
+            symbol_enable_incremental = enable_incremental
+            _update_collection_state(
+                symbol,
+                timeframe,
+                status="starting",
+                requested_start=start_time,
+                requested_end=end_time,
+                output_format=output_format,
+            )
             # 数据完整性验证：在下载前检查现有数据
             logger.info(f"Validating existing data integrity for {symbol}...")
             data_integrity_ok = True
+            gap_failure = False
 
             if output_format == "postgres" and postgres_storage is not None:
                 # 检查数据库中的数据完整性
@@ -2513,118 +2659,161 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 # 检查CSV文件中的数据完整性
                 existing_df = load_existing_data(symbol, output_dir, timeframe)
                 if existing_df is not None and not existing_df.empty:
-                    # 验证数据连续性
-                    if not validate_data_continuity(existing_df, interval_minutes=get_interval_minutes(timeframe)):
-                        logger.warning(f"Data continuity validation failed for {symbol} in CSV files")
-                        data_integrity_ok = False
+                    analysis = analyze_data_continuity(existing_df, interval_minutes=get_interval_minutes(timeframe))
+                    if not analysis["valid"]:
+                        # If duplicates only, auto-dedup and continue
+                        if analysis["duplicate_count"] > 0 and analysis["gap_count"] == 0:
+                            logger.warning(f"{symbol}: Found {analysis['duplicate_count']} duplicate timestamps, auto-deduplicating")
+                            try:
+                                cleaned_df = existing_df.copy()
+                                cleaned_df['timestamp'] = pd.to_datetime(cleaned_df['timestamp'], utc=True, errors='coerce')
+                                cleaned_df = cleaned_df.dropna(subset=['timestamp']).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                                symbol_safe = symbol.replace("/", "_")
+                                filepath = os.path.join(output_dir, symbol_safe, f"{symbol_safe}_{timeframe}.csv")
+                                cleaned_df.to_csv(filepath, index=False)
+                                existing_df = cleaned_df
+                                logger.info(f"{symbol}: Dedup completed, rows={len(cleaned_df)}")
+                                data_integrity_ok = True
+                            except Exception as dedup_error:
+                                logger.error(f"{symbol}: Dedup failed: {dedup_error}")
+                                data_integrity_ok = False
+                        else:
+                            if analysis["gap_count"] > 0 and enable_gap_backfill:
+                                missing_ranges = get_missing_ranges(existing_df, get_interval_minutes(timeframe))
+                                _update_collection_state(
+                                    symbol,
+                                    timeframe,
+                                    status="gap_backfill",
+                                    diagnostics={
+                                        "gap_count": analysis["gap_count"],
+                                        "coverage_ratio": analysis["coverage_ratio"],
+                                        "missing_ranges": [(str(s), str(e)) for s, e in missing_ranges],
+                                    },
+                                )
+                                try:
+                                    backfill_missing_ranges(
+                                        exchange=exchange,
+                                        symbol=symbol,
+                                        timeframe=timeframe,
+                                        existing_df=existing_df,
+                                    )
+                                    existing_df = load_existing_data(symbol, output_dir, timeframe)
+                                    analysis = analyze_data_continuity(existing_df, interval_minutes=get_interval_minutes(timeframe))
+                                except Exception as backfill_error:
+                                    logger.error(f"{symbol}: Gap backfill failed: {backfill_error}")
+
+                            if analysis["gap_count"] > 0:
+                                gap_failure = True
+                            logger.warning(
+                                f"Data continuity validation failed for {symbol}: "
+                                f"gaps={analysis['gap_count']}, duplicates={analysis['duplicate_count']}, "
+                                f"coverage={analysis['coverage_ratio']:.2%}"
+                            )
+                            data_integrity_ok = False
                     else:
                         logger.info(f"CSV data integrity OK for {symbol}: {len(existing_df)} points")
                 else:
                     logger.info(f"No existing CSV data for {symbol}")
 
-            # 如果数据完整性检查失败，尝试修复而不是删除
+            if enable_resume:
+                resume_state = _load_collection_state(symbol, timeframe)
+                resume_ts = resume_state.get("last_saved_ts") or resume_state.get("last_success_ts")
+                if resume_ts and (existing_df is None or existing_df.empty):
+                    try:
+                        resume_dt = pd.Timestamp(resume_ts, tz='UTC')
+                        start_dt = pd.Timestamp(start_time, tz='UTC')
+                        if resume_dt > start_dt:
+                            new_start = (resume_dt + pd.Timedelta(minutes=get_interval_minutes(timeframe))).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            logger.info(f"{symbol}: Resuming from {resume_ts}, adjusted start_time -> {new_start}")
+                            start_time = new_start
+                            _update_collection_state(
+                                symbol,
+                                timeframe,
+                                status="resuming",
+                                resume_from=resume_ts,
+                                adjusted_start=start_time,
+                            )
+                    except Exception as e:
+                        logger.warning(f"{symbol}: Failed to apply resume state: {e}")
+
+            # Data integrity failure handling: strict or renew
             if not data_integrity_ok:
-                logger.warning(f"Data integrity check failed for {symbol}, attempting to repair...")
-                
-                repair_successful = False
-                try:
-                    if output_format == "postgres" and postgres_storage is not None:
-                        # For PostgreSQL, remove duplicates
-                        logger.info(f"Removing duplicate timestamps from PostgreSQL for {symbol}...")
-                        with postgres_storage.engine.connect() as conn:
-                            # Use a simpler approach: delete all and re-insert unique rows
-                            db_result = conn.execute(text("""
-                                WITH unique_data AS (
-                                    SELECT DISTINCT ON (timestamp) *
-                                    FROM ohlcv_data
-                                    WHERE symbol = :symbol AND interval = :interval
-                                    ORDER BY timestamp, ctid
+                if integrity_mode == "strict":
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="failed",
+                        reason="integrity_failed",
+                    )
+                    raise IntegrityError(f"{symbol} ({timeframe}): data integrity validation failed")
+
+                if integrity_mode == "renew":
+                    state = _load_collection_state(symbol, timeframe)
+                    renew_count = int(state.get("renew_count", 0))
+                    if gap_failure:
+                        diagnostics = {}
+                        try:
+                            if existing_df is not None and not existing_df.empty:
+                                diagnostics = analyze_data_continuity(
+                                    existing_df,
+                                    interval_minutes=get_interval_minutes(timeframe)
                                 )
-                                DELETE FROM ohlcv_data
-                                WHERE symbol = :symbol AND interval = :interval
-                                  AND ctid NOT IN (SELECT ctid FROM unique_data)
-                            """), {"symbol": symbol, "interval": timeframe})
-                            conn.commit()
-                        logger.info(f"Successfully repaired PostgreSQL data for {symbol} (removed duplicates/malformed rows)")
-                        repair_successful = True
-                    else:
-                        # For CSV, read, deduplicate, and save
-                        logger.info(f"Repairing CSV file for {symbol} (deduplicating and cleaning malformed rows)...")
-                        symbol_safe = symbol.replace("/", "_")
-                        filepath = os.path.join(output_dir, symbol_safe, f"{symbol_safe}_{timeframe}.csv")
-                        
-                        if os.path.exists(filepath):
-                            df = pd.read_csv(filepath)
-                            original_count = len(df)
-                            
-                            # Deduplicate using normalize_klines
-                            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-                            df = normalize_klines(df)
-                            
-                            duplicates_removed = original_count - len(df)
-                            logger.info(f"Removed {duplicates_removed} duplicate timestamps from {symbol}")
-                            
-                            # Save repaired file
-                            df.to_csv(filepath, index=False)
-                            logger.info(f"Successfully repaired CSV file for {symbol}")
-                            repair_successful = True
-                except Exception as repair_error:
-                    logger.error(f"Failed to repair data for {symbol}: {repair_error}")
-                
-                # Only delete if repair failed
-                if not repair_successful:
-                    logger.warning(f"Repair failed, attempting backfill before clearing existing data for {symbol}")
+                                diagnostics["missing_ranges"] = [
+                                    (str(s), str(e))
+                                    for s, e in get_missing_ranges(existing_df, get_interval_minutes(timeframe))
+                                ]
+                        except Exception as diag_error:
+                            diagnostics = {"error": str(diag_error)}
 
-                    # Load existing data if available
-                    existing_df = None
-                    filepath = os.path.join(output_dir, symbol.replace("/","_"), f"{symbol.replace('/','_')}_{timeframe}.csv")
-                    if os.path.exists(filepath):
-                        existing_df = load_existing_data(symbol, base_dir=output_dir, interval=timeframe)
-                    else:
-                        existing_df = pd.DataFrame()
+                        logger.critical(
+                            f"{symbol} ({timeframe}): gap backfill failed. diagnostics={diagnostics}"
+                        )
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="failed",
+                            reason="gap_backfill_failed",
+                            diagnostics=diagnostics,
+                        )
+                        raise IntegrityError(
+                            f"{symbol} ({timeframe}): gap backfill failed; see collection_state for diagnostics"
+                        )
 
-                    # Detect missing ranges
-                    missing_ranges = []
-                    if existing_df is not None and not existing_df.empty:
-                        missing_ranges = get_missing_ranges(existing_df, get_interval_minutes(timeframe))
+                    if renew_count >= max_renew_attempts:
+                        diagnostics = {}
+                        try:
+                            if existing_df is not None and not existing_df.empty:
+                                diagnostics = analyze_data_continuity(
+                                    existing_df,
+                                    interval_minutes=get_interval_minutes(timeframe)
+                                )
+                        except Exception as diag_error:
+                            diagnostics = {"error": str(diag_error)}
 
-                    if missing_ranges:
-                        max_retries = int(config.get("data_collection", {}).get("max_consecutive_backfill_failures", 3))
-                        success_backfill = False
-                        for attempt in range(1, max_retries + 1):
-                            logger.info(f"{symbol}: Attempting backfill (attempt {attempt}/{max_retries}) for missing ranges")
-                            try:
-                                # backfill_missing_ranges will persist chunk state; pass exchange and symbol
-                                backfill_missing_ranges(exchange, symbol, timeframe, existing_df)
+                        logger.critical(
+                            f"{symbol} ({timeframe}): renew limit reached. "
+                            f"renew_count={renew_count}, diagnostics={diagnostics}"
+                        )
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="failed",
+                            reason="renew_limit_reached",
+                            renew_count=renew_count,
+                            diagnostics=diagnostics,
+                        )
+                        raise IntegrityError(
+                            f"{symbol} ({timeframe}): renew limit reached; see collection_state for diagnostics"
+                        )
 
-                                # Reload CSV and validate continuity
-                                existing_df = load_existing_data(symbol, base_dir=output_dir, interval=timeframe)
-                                if existing_df is not None and validate_data_continuity(existing_df, interval_minutes=get_interval_minutes(timeframe)):
-                                    logger.info(f"{symbol}: Backfill succeeded and data continuity restored")
-                                    success_backfill = True
-                                    break
-                                else:
-                                    logger.warning(f"{symbol}: Backfill attempt {attempt} did not restore continuity")
-                            except Exception as e:
-                                logger.error(f"{symbol}: Backfill attempt {attempt} failed: {e}")
-
-                        if not success_backfill:
-                            # Persist failure info and raise critical error for manual intervention
-                            info = {
-                                "failed_at": pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                "missing_ranges": [(str(s), str(e)) for s, e in missing_ranges],
-                                "attempts": max_retries,
-                                "reason": "backfill did not restore continuity"
-                            }
-                            try:
-                                _save_backfill_failure_state(symbol, info)
-                            except Exception:
-                                logger.warning(f"Failed to write persistent backfill failure state for {symbol}")
-
-                            logger.error(f"{symbol}: Backfill failed after {max_retries} attempts; marking as critical and raising")
-                            raise BackfillCriticalError(f"{symbol}: backfill failed after {max_retries} attempts; manual intervention required")
-
-                    # If no missing_ranges or backfill succeeded, proceed to clear data and download fresh
+                    logger.warning(f"{symbol}: Integrity failed, renewing by clearing existing data and re-collecting")
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="renewing",
+                        reason="integrity_failed",
+                        renew_count=renew_count + 1,
+                    )
                     try:
                         if output_format == "postgres" and postgres_storage is not None:
                             with postgres_storage.engine.connect() as conn:
@@ -2640,43 +2829,25 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                 os.remove(filepath)
                                 logger.info(f"Removed existing CSV file for {symbol}: {filepath}")
                     except Exception as e:
-                        logger.error(f"Failed to clear existing data for {symbol}: {e}")
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="failed",
+                            reason=f"renew_clear_failed: {e}",
+                        )
+                        raise
 
-                # After repair attempt, backfill missing ranges for CSV
-                if output_format != "postgres":
-                    try:
-                        existing_df = load_existing_data(symbol, output_dir, timeframe)
-                        if existing_df is not None and not existing_df.empty:
-                            # Allow CLI to override config for long backfill
-                            if args is not None and getattr(args, 'long_backfill', False):
-                                config.setdefault('data_collection', {})['enable_long_backfill'] = True
-                            if args is not None and getattr(args, 'backfill_chunk_days', None):
-                                config.setdefault('data_collection', {})['backfill_chunk_days'] = int(args.backfill_chunk_days)
-
-                            backfill_candles = backfill_missing_ranges(
-                                exchange=exchange,
-                                symbol=symbol,
-                                timeframe=timeframe,
-                                existing_df=existing_df,
-                            )
-                            # segmented backfill writes per chunk and persists state itself; no bulk candles may be returned
-                            if backfill_candles:
-                                backfill_candles = enhance_candles(backfill_candles, symbol, exchange)
-                                save_klines(
-                                    symbol,
-                                    output_dir,
-                                    backfill_candles,
-                                    append_only=False,
-                                    output_format=output_format,
-                                    postgres_storage=postgres_storage,
-                                )
-                                logger.info(
-                                    f"{symbol}: Backfilled {len(backfill_candles)} candles for missing ranges"
-                                )
-                        else:
-                            logger.warning(f"{symbol}: No existing data to backfill after repair")
-                    except Exception as e:
-                        logger.warning(f"{symbol}: Failed to backfill missing ranges: {e}")
+                    existing_df = None
+                    symbol_enable_incremental = False
+                else:
+                    logger.warning(f"Unknown integrity_mode '{integrity_mode}', defaulting to strict")
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="failed",
+                        reason="integrity_failed",
+                    )
+                    raise IntegrityError(f"{symbol} ({timeframe}): data integrity validation failed")
 
             # Helper function to save collected candles (used for both periodic and error-triggered saves)
             def save_collected_candles(candles_list, save_type="periodic"):
@@ -2696,6 +2867,24 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                                append_only=False,  # Let smart detection decide
                                output_format=output_format, 
                                postgres_storage=postgres_storage)
+
+                    try:
+                        last_saved_ts = temp_df['timestamp'].max()
+                        if pd.isna(last_saved_ts):
+                            last_saved_ts = None
+                        if last_saved_ts is not None:
+                            if not isinstance(last_saved_ts, pd.Timestamp):
+                                last_saved_ts = pd.Timestamp(last_saved_ts, utc=True)
+                            last_saved_ts = last_saved_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="saving",
+                            last_saved_ts=last_saved_ts,
+                            saved_count=len(temp_df),
+                        )
+                    except Exception as state_error:
+                        logger.warning(f"Failed to update collection state for {symbol}: {state_error}")
                     
                     logger.info(f"{save_type.capitalize()} save completed: {len(temp_df)} candles saved")
                     return True
@@ -2717,6 +2906,13 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 else:
                     logger.warning(f"{symbol}: Trading pair not available on exchange. Reason: {availability_info['reason']}")
                     logger.info(f"Skipping {symbol} - trading pair not available")
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="skipped",
+                        reason="market_not_available",
+                        detail=availability_info.get('reason'),
+                    )
                     continue
 
             if not availability_info['requested_range_valid']:
@@ -2737,16 +2933,29 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         logger.warning(f"{symbol}: Requested time range {original_start} to {end_time} is not available. "
                                      f"Earliest available: {availability_info.get('earliest_available', 'Unknown')}")
                         logger.info(f"Skipping {symbol} - requested time range not available")
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="skipped",
+                            reason="range_not_available",
+                            detail=availability_info.get('earliest_available'),
+                        )
                         continue
 
             # Calculate fetch window for this symbol if incremental is enabled
             times_adjusted = False
-            if enable_incremental:
+            if symbol_enable_incremental:
                 logger.debug(f"DEBUG: About to call calculate_fetch_window for {symbol}")  # Debug print
                 adjusted_start, adjusted_end, should_fetch = calculate_fetch_window(symbol, start_time, end_time, output_dir)
                 logger.debug(f"DEBUG: calculate_fetch_window returned should_fetch={should_fetch} for {symbol}, adjusted_start={adjusted_start}, adjusted_end={adjusted_end}")  # Debug print
                 if not should_fetch:
                     logger.info(f"Skipping {symbol} - no new data needed")
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="skipped",
+                        reason="no_new_data",
+                    )
                     continue
                 symbol_start_time = adjusted_start
                 symbol_end_time = adjusted_end
@@ -2812,6 +3021,14 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                 )
 
             logger.info(f"Fetching data for {symbol} from {symbol_start_time} to {symbol_end_time}")
+            _update_collection_state(
+                symbol,
+                timeframe,
+                status="collecting",
+                start_time=symbol_start_time,
+                end_time=symbol_end_time,
+                request_count=0,
+            )
 
             while request_count < max_requests:
                 # Check for shutdown signal
@@ -2960,6 +3177,13 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                     # Progress logging every 10 requests
                     if request_count % 10 == 0:
                         logger.info(f"Progress for {symbol}: {request_count} requests, {len(all_candles)} candles collected")
+                        _update_collection_state(
+                            symbol,
+                            timeframe,
+                            status="collecting",
+                            request_count=request_count,
+                            collected=len(all_candles),
+                        )
                     
                     # Periodic save every 10,000 candles to prevent data loss on interruption
                     PERIODIC_SAVE_THRESHOLD = 10000
@@ -3088,13 +3312,41 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
                         logger.warning(f"Failed to merge existing data for {symbol} into returned result: {merge_e}")
 
                 result[symbol] = df
+                try:
+                    last_ts = None
+                    if df is not None and not df.empty and 'timestamp' in df.columns:
+                        last_ts = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').max()
+                    if last_ts is not None and not pd.isna(last_ts):
+                        last_ts = last_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _update_collection_state(
+                        symbol,
+                        timeframe,
+                        status="completed",
+                        last_success_ts=last_ts,
+                        collected=len(df) if df is not None else 0,
+                        reason=None,
+                        diagnostics=None,
+                    )
+                except Exception as state_error:
+                    logger.warning(f"Failed to finalize collection state for {symbol}: {state_error}")
             else:
                 logger.info(f"No new candles collected for {symbol} in the specified range")
+                _update_collection_state(
+                    symbol,
+                    timeframe,
+                    status="completed",
+                    collected=0,
+                    reason=None,
+                    diagnostics=None,
+                )
 
         except Exception as e:
-            # If this is a BackfillCriticalError, propagate to stop the whole update run
+            # If this is a BackfillCriticalError or IntegrityError, propagate to stop the whole update run
             if isinstance(e, BackfillCriticalError):
                 logger.critical(f"Critical backfill failure for {symbol}: {e}")
+                raise
+            if isinstance(e, IntegrityError):
+                logger.critical(f"Strict integrity failure for {symbol}: {e}")
                 raise
 
             # If the exception occurred while parsing adjusted times, and times were adjusted by
@@ -3108,6 +3360,12 @@ def update_latest_data(symbols: List[str] = None, output_dir="data/klines", args
             logger.error(f"Traceback: {traceback.format_exc()}") 
             # Continue to next symbol instead of exiting
             logger.info(f"Skipping {symbol} and continuing with next symbol...")
+            _update_collection_state(
+                symbol,
+                timeframe,
+                status="failed",
+                reason=str(e),
+            )
             continue
 
     logger.debug(f"Update complete, result: {result}")

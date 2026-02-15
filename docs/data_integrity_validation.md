@@ -49,7 +49,19 @@ Modified to:
 
 ## Usage
 
-The feature is automatically enabled in the data collection workflow. No additional configuration is required.
+The feature is automatically enabled in the data collection workflow. Configuration is optional but recommended.
+
+### Key Configuration (config/workflow.json)
+
+- `data_collection.integrity_mode`: `strict|renew`
+	- `strict`: fail fast when gaps/duplicates are detected.
+	- `renew`: delete the symbol's existing data and re-collect from source.
+- `data_collection.collection_state_dir`: stores per-symbol collection status for resume.
+- `data_collection.backfill_state_dir`: stores long-backfill chunk state and failures.
+
+These two state directories are separate by design:
+- `collection_state_dir` tracks normal collection progress (resume after interruptions).
+- `backfill_state_dir` tracks long backfill progress and failures.
 
 ### Validation Thresholds
 - **Gap Tolerance**: 2x expected interval (e.g., 2 minutes for 1m data)
