@@ -77,3 +77,7 @@ Created: 2026-02-10 09:12:00
 - 2026-02-14: convert_to_qlib 增加“resample 后无新增 bar 则跳过 symbol”的过滤，避免无意义的重复转换。
 - 2026-02-14: 修复 data_service 转换门槛的 okx_data_collector 导入路径，并修正 convert_to_qlib 在 1min 场景未追加 CSV 的问题；更新相关测试断言。
 - 2026-02-14: data_service 转换门槛改为严格 end_time 覆盖（end_tolerance=0），修复测试用例与时区处理错误。
+- 2026-02-15: data_service 转换后输出 funding_rate 起始时间汇总（csv/db），新增 CSV 汇总测试。
+- 2026-02-15: data_service 转换门槛支持 per-symbol 最早可用起点，并将 expected_end 向下取整到 interval，避免秒级偏差导致阻断。
+- 2026-02-15: end_time 对齐改为对比“分钟级取整”的 last_ts，避免秒级差异阻断转换。
+- 2026-02-15: convert_to_qlib 增加 funding_rate summary 输出（CSV/DB），并在无新增数据时也记录；新增 CSV 汇总单测覆盖。

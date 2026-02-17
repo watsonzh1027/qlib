@@ -422,6 +422,7 @@ class DataService:
                 expected_end = expected_end.tz_localize('UTC')
             else:
                 expected_end = expected_end.tz_convert('UTC')
+            expected_end = expected_end.floor(f"{interval_minutes}T")
 
             postgres_storage = None
             if output_format == "postgres":
@@ -455,9 +456,15 @@ class DataService:
                 last_ts = pd.Timestamp(last_ts, tz='UTC') if last_ts.tzinfo is None else pd.Timestamp(last_ts).tz_convert('UTC')
 
                 earliest_floor = _earliest_manager.get_earliest(symbol, interval)
+                if earliest_floor is None and symbol.endswith("USDT"):
+                    alt_symbol = f"{symbol[:-4]}/USDT"
+                    earliest_floor = _earliest_manager.get_earliest(alt_symbol, interval)
+
                 symbol_start = expected_start
                 if earliest_floor and earliest_floor > symbol_start:
                     symbol_start = earliest_floor
+                elif earliest_floor is None and first_ts > symbol_start:
+                    symbol_start = first_ts
 
                 if first_ts > symbol_start + start_tolerance:
                     incomplete.append(
@@ -465,6 +472,7 @@ class DataService:
                     )
                     continue
 
+                last_ts = last_ts.floor(f"{interval_minutes}T")
                 if last_ts < expected_end - end_tolerance:
                     incomplete.append(
                         f"{symbol}: ends at {last_ts.isoformat()} (expected >= {(expected_end - end_tolerance).isoformat()})"
@@ -705,6 +713,8 @@ class DataService:
             
             if result.returncode == 0:
                 logger.info("Qlib conversion completed successfully")
+
+                self._log_conversion_summary()
                 
                 # Verify Qlib data health
                 logger.info("Verifying Qlib data health...")
@@ -730,6 +740,130 @@ class DataService:
         except Exception as e:
             logger.error(f"Qlib conversion error: {e}")
             return False
+
+    def _log_conversion_summary(self) -> None:
+        """Log a conversion summary including funding_rate availability per symbol."""
+        summary = self._get_funding_rate_start_times()
+        if not summary:
+            logger.warning("Conversion summary skipped: no funding_rate data available")
+            return
+
+        logger.info("Conversion summary: funding_rate start times per symbol")
+        for symbol in sorted(summary.keys()):
+            start_time = summary[symbol]
+            if start_time is None:
+                logger.info(f"Funding rate start - {symbol}: None")
+            else:
+                logger.info(f"Funding rate start - {symbol}: {start_time}")
+
+    def _get_funding_rate_start_times(self) -> Dict[str, Optional[str]]:
+        """Return earliest funding_rate timestamp per symbol (non-null and non-zero)."""
+        try:
+            (
+                load_symbols,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+            ) = self._load_okx_helpers()
+
+            symbols = load_symbols(self.config.symbols_file)
+            if not symbols:
+                return {}
+
+            data_source = self.config.config.get('data_convertor', {}).get('data_source', 'db')
+            if isinstance(data_source, str):
+                data_source = data_source.lower()
+
+            if data_source in ["db", "both"]:
+                return self._funding_rate_start_from_db(symbols)
+
+            return self._funding_rate_start_from_csv(symbols)
+        except Exception as e:
+            logger.error(f"Failed to build funding_rate summary: {e}")
+            return {}
+
+    def _funding_rate_start_from_csv(self, symbols: List[str]) -> Dict[str, Optional[str]]:
+        base_dir = self.config.config.get("data", {}).get("csv_data_dir", "data/klines")
+        interval = self.config.base_interval
+        summary: Dict[str, Optional[str]] = {}
+
+        for symbol in symbols:
+            symbol_safe = symbol.replace("/", "_")
+            candidates = [
+                os.path.join(base_dir, symbol_safe, f"{symbol_safe}_{interval}.csv"),
+                os.path.join(base_dir, symbol_safe, f"{symbol_safe}.csv"),
+            ]
+            csv_path = next((fp for fp in candidates if os.path.exists(fp)), None)
+            if csv_path is None:
+                summary[symbol] = None
+                continue
+
+            try:
+                header = pd.read_csv(csv_path, nrows=0)
+                if "funding_rate" not in header.columns or "timestamp" not in header.columns:
+                    summary[symbol] = None
+                    continue
+
+                start_ts = None
+                for chunk in pd.read_csv(csv_path, usecols=["timestamp", "funding_rate"], chunksize=100000):
+                    chunk = chunk.dropna(subset=["funding_rate", "timestamp"])
+                    if chunk.empty:
+                        continue
+
+                    mask = chunk["funding_rate"].astype(float) != 0.0
+                    if not mask.any():
+                        continue
+
+                    ts = pd.to_datetime(chunk.loc[mask, "timestamp"], utc=True, errors="coerce").dropna()
+                    if not ts.empty:
+                        start_ts = ts.min().isoformat()
+                        break
+
+                summary[symbol] = start_ts
+            except Exception as e:
+                logger.warning(f"Failed to read funding_rate from {csv_path}: {e}")
+                summary[symbol] = None
+
+        return summary
+
+    def _funding_rate_start_from_db(self, symbols: List[str]) -> Dict[str, Optional[str]]:
+        from sqlalchemy import text
+        from postgres_storage import PostgreSQLStorage
+        from postgres_config import PostgresConfig
+
+        db_config = self.config.config.get("database", {})
+        postgres_config = PostgresConfig(
+            host=db_config.get("host", "localhost"),
+            database=db_config.get("database", "qlib_crypto"),
+            user=db_config.get("user", "crypto_user"),
+            password=db_config.get("password", "crypto"),
+            port=db_config.get("port", 5432)
+        )
+        postgres_storage = PostgreSQLStorage.from_config(postgres_config)
+        summary: Dict[str, Optional[str]] = {}
+
+        query = text(
+            """
+            SELECT MIN(timestamp) AS start_ts
+            FROM funding_rates
+            WHERE symbol = :symbol
+              AND funding_rate IS NOT NULL
+              AND funding_rate <> 0
+            """
+        )
+
+        with postgres_storage.engine.connect() as conn:
+            for symbol in symbols:
+                row = conn.execute(query, {"symbol": symbol}).fetchone()
+                start_ts = row[0] if row and row[0] else None
+                if start_ts is not None:
+                    start_ts = pd.Timestamp(start_ts, tz='UTC').isoformat()
+                summary[symbol] = start_ts
+
+        return summary
     
     def _run_update_cycle(self) -> bool:
         """

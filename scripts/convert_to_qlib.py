@@ -766,6 +766,156 @@ def convert_interval_to_qlib_freq(interval: str) -> str:
         return interval.replace("h", "60min").replace("m", "min") if interval.endswith(("h", "m")) else interval
 
 
+_SUMMARY_LOGGED = False
+
+
+def _load_instrument_symbols(config: Dict[str, Any]) -> List[str]:
+    data_config = config.get("data", {})
+    data_convertor = config.get("data_convertor", {})
+    instruments_file = data_convertor.get("instruments_file") or data_config.get("symbols")
+    if instruments_file == "<data.symbols>":
+        instruments_file = data_config.get("symbols")
+    if not instruments_file:
+        return []
+
+    if not os.path.isabs(instruments_file):
+        instruments_file = os.path.join(str(project_root), instruments_file)
+
+    try:
+        with open(instruments_file, "r") as f:
+            inst_data = json.load(f)
+        return inst_data.get("symbols", [])
+    except Exception as e:
+        logger.warning(f"Failed to load instruments file {instruments_file}: {e}")
+        return []
+
+
+def funding_rate_summary_from_csv(
+    symbols: List[str],
+    base_dir: str,
+    interval: str,
+) -> Dict[str, Optional[str]]:
+    summary: Dict[str, Optional[str]] = {}
+
+    for symbol in symbols:
+        symbol_safe = symbol.replace("/", "_")
+        candidates = [
+            os.path.join(base_dir, symbol_safe, f"{symbol_safe}_{interval}.csv"),
+            os.path.join(base_dir, symbol_safe, f"{symbol_safe}.csv"),
+        ]
+        csv_path = next((fp for fp in candidates if os.path.exists(fp)), None)
+        if csv_path is None:
+            summary[symbol] = None
+            continue
+
+        try:
+            header = pd.read_csv(csv_path, nrows=0)
+            if "funding_rate" not in header.columns or "timestamp" not in header.columns:
+                summary[symbol] = None
+                continue
+
+            start_ts = None
+            for chunk in pd.read_csv(csv_path, usecols=["timestamp", "funding_rate"], chunksize=100000):
+                chunk = chunk.dropna(subset=["funding_rate", "timestamp"])
+                if chunk.empty:
+                    continue
+
+                mask = chunk["funding_rate"].astype(float) != 0.0
+                if not mask.any():
+                    continue
+
+                ts = pd.to_datetime(chunk.loc[mask, "timestamp"], utc=True, errors="coerce").dropna()
+                if not ts.empty:
+                    start_ts = ts.min().isoformat()
+                    break
+
+            summary[symbol] = start_ts
+        except Exception as e:
+            logger.warning(f"Failed to read funding_rate from {csv_path}: {e}")
+            summary[symbol] = None
+
+    return summary
+
+
+def _funding_rate_summary_from_db(
+    symbols: List[str],
+    db_config: Dict[str, Any],
+) -> Dict[str, Optional[str]]:
+    summary: Dict[str, Optional[str]] = {}
+    conn = None
+
+    try:
+        conn = psycopg2.connect(
+            host=db_config.get("host", "localhost"),
+            port=db_config.get("port", 5432),
+            database=db_config.get("database", "qlib_crypto"),
+            user=db_config.get("user", "crypto_user"),
+            password=db_config.get("password", "change_me_in_production"),
+            connect_timeout=10,
+        )
+        query = (
+            "SELECT MIN(timestamp) "
+            "FROM funding_rates "
+            "WHERE symbol = %s "
+            "AND funding_rate IS NOT NULL "
+            "AND funding_rate <> 0"
+        )
+        with conn.cursor() as cursor:
+            for symbol in symbols:
+                cursor.execute(query, (symbol,))
+                row = cursor.fetchone()
+                start_ts = row[0] if row and row[0] else None
+                if start_ts is not None:
+                    start_ts = pd.Timestamp(start_ts, tz="UTC").isoformat()
+                summary[symbol] = start_ts
+    except Exception as e:
+        logger.warning(f"Failed to query funding_rate summary from DB: {e}")
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return summary
+
+
+def _log_conversion_summary(config: Dict[str, Any], source: str) -> None:
+    global _SUMMARY_LOGGED
+    if _SUMMARY_LOGGED:
+        return
+
+    symbols = _load_instrument_symbols(config)
+    if not symbols:
+        logger.warning("Conversion summary skipped: no symbols loaded")
+        _SUMMARY_LOGGED = True
+        return
+
+    data_config = config.get("data", {})
+    data_collection = config.get("data_collection", {})
+    db_config = config.get("database", {})
+    base_dir = data_config.get("csv_data_dir", "data/klines")
+    interval = data_collection.get("interval", "1m")
+
+    if source in ["db", "both"]:
+        summary = _funding_rate_summary_from_db(symbols, db_config)
+    else:
+        summary = funding_rate_summary_from_csv(symbols, base_dir, interval)
+
+    if not summary:
+        logger.warning("Conversion summary skipped: no funding_rate data available")
+        _SUMMARY_LOGGED = True
+        return
+
+    logger.info("Conversion summary: funding_rate start times per symbol")
+    for symbol in sorted(summary.keys()):
+        start_time = summary[symbol]
+        if start_time is None:
+            logger.info(f"Funding rate start - {symbol}: None")
+        else:
+            logger.info(f"Funding rate start - {symbol}: {start_time}")
+
+    _SUMMARY_LOGGED = True
+
+
 def convert_to_qlib(source: str = None, freq: str = None):
     """
     Convert OHLCV data from CSV and/or database format to Qlib-compatible binary format.
@@ -1172,6 +1322,7 @@ def convert_to_qlib(source: str = None, freq: str = None):
     # Now process all data at once
     if not all_data:
         logger.info(f"No new data found for {target_freq}; skipping conversion.")
+        _log_conversion_summary(config, source)
         return
     
     # Create temporary directory for CSV files
@@ -1208,6 +1359,7 @@ def convert_to_qlib(source: str = None, freq: str = None):
         logger.info(f"After convert - Target folder: {output_dir}, Total features: {total_features}, Time taken: {elapsed_time:.2f}s")
     
     print(f"Completed conversion to {target_freq}")
+    _log_conversion_summary(config, source)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert cryptocurrency data to Qlib format")
