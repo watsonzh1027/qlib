@@ -916,13 +916,14 @@ def _log_conversion_summary(config: Dict[str, Any], source: str) -> None:
     _SUMMARY_LOGGED = True
 
 
-def convert_to_qlib(source: str = None, freq: str = None):
+def convert_to_qlib(source: str = None, freq: str = None, force: bool = False):
     """
-    Convert OHLCV data from CSV and/or database format to Qlib-compatible binary format.
+    Convert cryptocurrency data to Qlib format.
     
     Args:
-        source: Data source - "csv", "db", or "both". If None, uses config data_source.
-        freq: Target frequency (e.g., '15min', '60min'). Overrides config.
+        source: Data source ('csv', 'db', or 'both'). If None, reads from config.
+        freq: Target frequency (e.g., '15min', '60min'). If None, reads from config.
+        force: If True, forces full re-conversion ignoring existing data.
     """
     # Get configuration parameters
     data_config = config.get("data", {})
@@ -1026,7 +1027,9 @@ def convert_to_qlib(source: str = None, freq: str = None):
             logger.warning(f"Failed to load existing instruments from {inst_path}: {e}")
             return {}
 
-    existing_end_map = _load_existing_instrument_ends(output_dir)
+    existing_end_map = {} if force else _load_existing_instrument_ends(output_dir)
+    if force:
+        logger.info(f"Force mode enabled: ignoring existing data, will perform full conversion.")
 
     expected_map = {}
     expected_keys = set()
@@ -1367,9 +1370,11 @@ if __name__ == "__main__":
                        help="Data source: csv (CSV files), db (database), or both. If not specified, uses config data_source.")
     parser.add_argument("--freq", action='append', help="Target frequency (e.g., 15min, 60min). Can be specified multiple times.")
     parser.add_argument("--timeframes", action='append', help="Alias for --freq, supported for data_service compatibility.")
+    parser.add_argument("--force", action='store_true', help="Force full re-conversion, ignoring existing data.")
     args = parser.parse_args()
     
-    source = args.source if args.source else 'db'
+    # If --source not provided, let convert_to_qlib() read from config (default: None)
+    source = args.source if args.source else None
     
     # Collect all frequencies from both --freq and --timeframes
     freqs = []
@@ -1386,8 +1391,8 @@ if __name__ == "__main__":
             
     if not unique_freqs:
         # If no freq provided, run once with default from config
-        convert_to_qlib(source=source)
+        convert_to_qlib(source=source, force=args.force)
     else:
         for f in unique_freqs:
             logger.info(f"Starting conversion task for frequency: {f}")
-            convert_to_qlib(source=source, freq=f)
+            convert_to_qlib(source=source, freq=f, force=args.force)
