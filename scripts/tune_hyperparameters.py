@@ -13,6 +13,7 @@ import time
 import os
 import optuna
 import pandas as pd
+import copy
 from pathlib import Path
 import logging
 import argparse
@@ -77,6 +78,28 @@ def parse_metrics(output):
     
     return metrics
 
+
+def get_allowed_frequencies(config: Dict[str, Any]) -> List[str]:
+    workflow_freq = config.get("workflow", {}).get("frequency")
+    target_timeframes = config.get("data_service", {}).get("target_timeframes", [])
+    allowed = []
+
+    if workflow_freq:
+        allowed.append(workflow_freq)
+    if isinstance(target_timeframes, list):
+        allowed.extend([f for f in target_timeframes if isinstance(f, str)])
+
+    # Remove duplicates while preserving order
+    seen = set()
+    allowed = [f for f in allowed if not (f in seen or seen.add(f))]
+
+    return allowed or ["15min"]
+
+
+def make_study_suffix(values: List[str]) -> str:
+    joined = "-".join(values)
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", joined)
+
 # --- WFV Fold Generator ---
 def generate_wfv_folds(start_date, end_date, n_folds=3, ratio=(6, 1, 2), step_months=3):
     from dateutil.relativedelta import relativedelta
@@ -108,7 +131,7 @@ def generate_wfv_folds(start_date, end_date, n_folds=3, ratio=(6, 1, 2), step_mo
 
 # --- Objectives ---
 
-def objective_model(trial, model_type, folds, base_config, symbol):
+def objective_model(trial, model_type, folds, base_config, symbol, allowed_freqs: List[str]):
     """Phase 1: Optimize Model for IC"""
     trial_id = trial.number
     safe_symbol = symbol.replace("/", "_")
@@ -116,18 +139,49 @@ def objective_model(trial, model_type, folds, base_config, symbol):
     
     # 1. Suggest Model Params
     params = {}
-    frequency = trial.suggest_categorical("frequency", ["60min", "240min"])
+    frequency = trial.suggest_categorical("frequency", allowed_freqs)
     params["frequency"] = frequency
     
+    # Get tuning ranges from config
+    tuning_ranges = base_config.get("training", {}).get("tuning_ranges", {}).get(model_type, {})
+    
+    if not tuning_ranges:
+        # Fallback to hardcoded defaults if not in config
+        logger.warning(f"No tuning_ranges found for {model_type} in config, using defaults")
+        if model_type == "lightgbm":
+            tuning_ranges = {
+                "learning_rate": {"min": 0.01, "max": 0.2, "log": True},
+                "num_leaves": {"min": 16, "max": 255},
+                "lambda_l2": {"min": 1e-4, "max": 10.0, "log": True},
+                "max_depth": {"min": 3, "max": 12}
+            }
+        else:
+            raise ValueError(f"Model {model_type} not supported and no tuning_ranges in config")
+    
+    # Dynamically suggest parameters based on config
+    for param_name, param_range in tuning_ranges.items():
+        if "min" in param_range and "max" in param_range:
+            # Determine parameter type - check if both min and max are integers without decimals
+            min_val = param_range["min"]
+            max_val = param_range["max"]
+            
+            if isinstance(min_val, (int, float)) and isinstance(max_val, (int, float)):
+                # Check if values are whole numbers (integers)
+                if min_val == int(min_val) and max_val == int(max_val):
+                    # Integer parameter
+                    step = param_range.get("step", 1)
+                    params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=step)
+                else:
+                    # Float parameter
+                    use_log = param_range.get("log", False)
+                    params[param_name] = trial.suggest_float(param_name, min_val, max_val, log=use_log)
+    
+    # Model-specific fixed params
     if model_type == "lightgbm":
-        params["learning_rate"] = trial.suggest_float("learning_rate", 0.01, 0.2, log=True)
-        params["num_leaves"] = trial.suggest_int("num_leaves", 16, 255)
-        params["lambda_l2"] = trial.suggest_float("lambda_l2", 1e-4, 10.0, log=True)
-        params["max_depth"] = trial.suggest_int("max_depth", 3, 12)
         params["num_threads"] = 4
     
     # 2. Update Config
-    trial_config = base_config.copy()
+    trial_config = copy.deepcopy(base_config)
     if "workflow" not in trial_config: trial_config["workflow"] = {}
     trial_config["workflow"]["frequency"] = frequency
     
@@ -183,7 +237,7 @@ def objective_strategy(trial, folds, base_config, symbol, best_model_params, mod
     min_sigma = trial.suggest_float("min_sigma", 0.0, 1.0)
     
     # 2. Update Config
-    trial_config = base_config.copy()
+    trial_config = copy.deepcopy(base_config)
     
     # Inject Fixed Model Params (including Frequency)
     best_freq = best_model_params.get("frequency", "240min")
@@ -257,7 +311,9 @@ def get_storage_url(config: Dict[str, Any]) -> str:
 def run_model_tuning(args, base_config, symbol, folds, model_type):
     logger.info(f"🚀 [Phase 1] Tuning Model for {symbol} (Target: IC)")
     storage_url = get_storage_url(base_config)
-    study_name = f"tuning_model_{symbol.replace('/','_')}"
+    allowed_freqs = get_allowed_frequencies(base_config)
+    study_suffix = make_study_suffix(allowed_freqs)
+    study_name = f"tuning_model_{symbol.replace('/','_')}_freq_{study_suffix}"
     
     study = optuna.create_study(
         study_name=study_name, 
@@ -271,7 +327,8 @@ def run_model_tuning(args, base_config, symbol, folds, model_type):
         logger.info(f"⚠️  Parallel mode (n_jobs={args.n_jobs}) enabled. Console logs from workers may be buffered.")
         logger.info(f"👉 Please run: tail -f logs/qlib-tuning-1.log to monitor realtime details.")
 
-    study.optimize(lambda t: objective_model(t, model_type, folds, base_config, symbol), 
+    allowed_freqs = get_allowed_frequencies(base_config)
+    study.optimize(lambda t: objective_model(t, model_type, folds, base_config, symbol, allowed_freqs), 
                    n_trials=args.trials, n_jobs=args.n_jobs, show_progress_bar=True)
     
     logger.info(f"✅ Best IC: {study.best_value:.4f}")
@@ -286,7 +343,7 @@ def run_strategy_tuning(args, base_config, symbol, folds, model_type, best_model
     pretrained_models = []
     
     pretrain_cfg_path = TMP_DIR / f"pretrain_{symbol.replace('/','_')}.json"
-    pretrain_cfg = base_config.copy()
+    pretrain_cfg = copy.deepcopy(base_config)
     best_freq = best_model_params.get("frequency", "240min")
     if "workflow" not in pretrain_cfg: pretrain_cfg["workflow"] = {}
     pretrain_cfg["workflow"]["frequency"] = best_freq
@@ -349,12 +406,17 @@ def main():
     parser.add_argument("--stage", choices=["model", "strategy", "all"], default="all")
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--rows", type=int, default=None, help="Limit symbols")
-    parser.add_argument("--model", default="lightgbm")
+    parser.add_argument("--model", default=None, help="Model type (default: from config)")
     parser.add_argument("--n_jobs", type=int, default=1, help="Parallel workers")
     args = parser.parse_args()
     
     setup_dirs()
     base_config = load_config()
+    
+    # Use model from config if not specified
+    if args.model is None:
+        args.model = base_config.get("training", {}).get("model_type", "lightgbm")
+        logger.info(f"Using model type from config: {args.model}")
     
     # Get symbols
     sym_cfg = base_config.get("data", {}).get("symbols", [])

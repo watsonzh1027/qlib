@@ -12,7 +12,7 @@
         "normalize_dir": "data/normalize",
         "bin_data_dir": "data/qlib_data/crypto",
         "market_type": "future",
-        "symbols": "config/instruments.json"
+        "symbols": "config/eth_only.json"
     },
     "data_service": {
         "enabled": true,
@@ -78,16 +78,15 @@
             "low",
             "close",
             "volume",
-            "vwap",
-            "funding_rate"
+            "vwap"
         ],
         "instruments_file": "<data.symbols>",
         "data_source": "csv"
     },
     "workflow": {
         "start_time": "2024-01-01",
-        "end_time": "",
-        "frequency": "240min",
+        "end_time": "2026-02-12",
+        "frequency": "15min",
         "instruments_limit": 50
     },
     "backtest": {
@@ -127,15 +126,15 @@
         }
     },
     "data_handler_config": {
-        "class": "CryptoAlpha158WithFunding",
-        "module_path": "qlib.contrib.data.handler_crypto",
+        "class": "Alpha158",
+        "module_path": "qlib.contrib.data.handler",
         "kwargs": {
             "start_time": "<workflow.start_time>",
-            "end_time": "2026-01-01",
+            "end_time": "<workflow.end_time>",
             "instruments": "<data.symbols>",
             "freq": "<workflow.frequency>",
             "fit_start_time": "<workflow.start_time>",
-            "fit_end_time": "2024-12-31",
+            "fit_end_time": "2025-12-31",
             "infer_processors": [],
             "learn_processors": [
                 {
@@ -151,8 +150,6 @@
         }
     },
     "training": {
-        "start_time": "2023-01-01",
-        "end_time": "2024-12-31",
         "model_type": "lightgbm",
         "feature_handler": "<data_handler_config.class>",
         "device": "auto",
@@ -166,16 +163,103 @@
             "step_months": 3,
             "n_folds": 3
         },
+        "tuning_ranges": {
+            "lightgbm": {
+                "learning_rate": {
+                    "min": 0.01,
+                    "max": 0.2,
+                    "log": true
+                },
+                "num_leaves": {
+                    "min": 16,
+                    "max": 255
+                },
+                "lambda_l2": {
+                    "min": 0.0001,
+                    "max": 10.0,
+                    "log": true
+                },
+                "max_depth": {
+                    "min": 3,
+                    "max": 12
+                }
+            },
+            "xgboost": {
+                "learning_rate": {
+                    "min": 0.01,
+                    "max": 0.3,
+                    "log": true
+                },
+                "max_depth": {
+                    "min": 3,
+                    "max": 10
+                },
+                "n_estimators": {
+                    "min": 100,
+                    "max": 1000
+                }
+            },
+            "lstm": {
+                "hidden_size": {
+                    "min": 32,
+                    "max": 128,
+                    "step": 16
+                },
+                "num_layers": {
+                    "min": 1,
+                    "max": 4
+                },
+                "dropout": {
+                    "min": 0.0,
+                    "max": 0.5
+                },
+                "lr": {
+                    "min": 0.0001,
+                    "max": 0.01,
+                    "log": true
+                },
+                "batch_size": {
+                    "min": 256,
+                    "max": 2048,
+                    "step": 256
+                }
+            },
+            "alstm": {
+                "hidden_size": {
+                    "min": 32,
+                    "max": 128,
+                    "step": 16
+                },
+                "num_layers": {
+                    "min": 1,
+                    "max": 4
+                },
+                "dropout": {
+                    "min": 0.0,
+                    "max": 0.5
+                },
+                "lr": {
+                    "min": 0.0001,
+                    "max": 0.01,
+                    "log": true
+                },
+                "batch_size": {
+                    "min": 256,
+                    "max": 2048,
+                    "step": 256
+                }
+            }
+        },
         "models": {
             "lightgbm": {
                 "loss": "mse",
                 "colsample_bytree": 0.8879,
-                "learning_rate": 0.01,
+                "learning_rate": 0.014546161147000865,
                 "subsample": 0.8789,
                 "lambda_l1": 0.01,
-                "lambda_l2": 0.001,
-                "max_depth": 6,
-                "num_leaves": 70,
+                "lambda_l2": 8.581029601125486,
+                "max_depth": 12,
+                "num_leaves": 96,
                 "num_threads": 20
             },
             "xgboost": {

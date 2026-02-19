@@ -44,17 +44,16 @@ def get_data_dir_for_freq(base_dir, freq):
     - 'data/qlib_data/crypto_60min' for freq='60min'
     - 'data/qlib_data/crypto_240min' for freq='240min'
     """
+    normalized_base = str(base_dir).rstrip("/")
+    if normalized_base.endswith(f"_{freq}"):
+        return normalized_base
+
     # Extract the frequency number (e.g., "15" from "15min")
     import re
     match = re.match(r'(\d+)(min|hour|day)', freq)
     if match:
-        num, unit = match.groups()
-        if unit == 'min':
-            return f"{base_dir}_{freq}"
-        else:
-            # For hour/day, might need different naming
-            return f"{base_dir}_{freq}"
-    return base_dir
+        return f"{normalized_base}_{freq}"
+    return normalized_base
 
 def _compute_ic_icir(pred: pd.Series, label: pd.Series):
     pred = pred.copy()
@@ -226,8 +225,54 @@ def main():
                 "early_stopping_rounds": 50
             }
         }
+    elif args.model == "xgboost":
+        model_config = {
+            "class": "XGBModel",
+            "module_path": "qlib.contrib.model.xgboost",
+            "kwargs": {
+                "booster": model_params.get("booster", "gbtree"),
+                "learning_rate": model_params.get("learning_rate", 0.01),
+                "max_depth": int(model_params.get("max_depth", 6)),
+                "n_estimators": int(model_params.get("n_estimators", 500)),
+                "objective": model_params.get("objective", "reg:squarederror")
+            }
+        }
+    elif args.model == "lstm":
+        model_config = {
+            "class": "LSTM",
+            "module_path": "qlib.contrib.model.pytorch_lstm",
+            "kwargs": {
+                "d_feat": int(model_params.get("d_feat", 158)),
+                "hidden_size": int(model_params.get("hidden_size", 64)),
+                "num_layers": int(model_params.get("num_layers", 2)),
+                "dropout": float(model_params.get("dropout", 0.2)),
+                "n_epochs": int(model_params.get("n_epochs", 100)),
+                "lr": float(model_params.get("lr", 0.001)),
+                "batch_size": int(model_params.get("batch_size", 512)),
+                "early_stop": int(model_params.get("early_stop", 20)),
+                "loss": model_params.get("loss", "mse"),
+                "optimizer": model_params.get("optimizer", "adam")
+            }
+        }
+    elif args.model == "alstm":
+        model_config = {
+            "class": "ALSTM",
+            "module_path": "qlib.contrib.model.pytorch_alstm",
+            "kwargs": {
+                "d_feat": int(model_params.get("d_feat", 158)),
+                "hidden_size": int(model_params.get("hidden_size", 64)),
+                "num_layers": int(model_params.get("num_layers", 2)),
+                "dropout": float(model_params.get("dropout", 0.2)),
+                "n_epochs": int(model_params.get("n_epochs", 100)),
+                "lr": float(model_params.get("lr", 0.001)),
+                "batch_size": int(model_params.get("batch_size", 512)),
+                "early_stop": int(model_params.get("early_stop", 20)),
+                "loss": model_params.get("loss", "mse"),
+                "optimizer": model_params.get("optimizer", "adam"),
+                "rnn_type": model_params.get("rnn_type", "LSTM")
+            }
+        }
     else:
-        # Fallback or support other models
         raise ValueError(f"Model {args.model} not supported in this script yet")
 
     model = init_instance_by_config(model_config)
